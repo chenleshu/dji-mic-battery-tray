@@ -16,8 +16,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace DjiMicBattery
 {
@@ -262,11 +262,17 @@ namespace DjiMicBattery
                     return New("offline", 0.0, "大疆麦克风电量：接收器在线，发射器未连接", "接收器在线 · 发射器未连接");
                 }
 
-                List<string> parts = new List<string>();
+                List<string> tooltipParts = new List<string>();
+                List<string> summaryParts = new List<string>();
                 foreach (TransmitterState tx in connected)
                 {
                     GaugeInfo info = GaugeInfo.FromGauge(tx.BatteryGauge);
-                    parts.Add("TX" + tx.Slot + " " + info.Label + (tx.Charging ? " ⚡" : ""));
+                    string charge = tx.Charging ? " ⚡" : "";
+                    string percentage = info.EstimatedPercent.HasValue
+                        ? "约 " + info.EstimatedPercent.Value + "%"
+                        : "待采样";
+                    tooltipParts.Add("TX" + tx.Slot + " " + percentage + charge);
+                    summaryParts.Add("TX" + tx.Slot + " " + info.Label + charge);
                 }
 
                 List<TransmitterState> known = connected
@@ -275,8 +281,13 @@ namespace DjiMicBattery
                 GaugeInfo worst = known.Count == 0
                     ? GaugeInfo.FromGauge(null)
                     : GaugeInfo.FromGauge(known.Max(tx => tx.BatteryGauge.Value));
-                string summary = string.Join(" · ", parts.ToArray());
-                return New(worst.Tone, worst.Fill, "大疆麦克风电量 | " + string.Join(" | ", parts.ToArray()), summary);
+                string summary = string.Join(" · ", summaryParts.ToArray());
+                return New(
+                    worst.Tone,
+                    worst.Fill,
+                    "大疆麦克风电量 | " + string.Join(" | ", tooltipParts.ToArray()),
+                    summary
+                );
             }
 
             string fallback;
@@ -300,20 +311,28 @@ namespace DjiMicBattery
         public string Label { get; private set; }
         public string Tone { get; private set; }
         public double Fill { get; private set; }
+        public int? EstimatedPercent { get; private set; }
 
         public static GaugeInfo FromGauge(int? gauge)
         {
-            if (!gauge.HasValue || gauge.Value < 1 || gauge.Value > 7) return New("待采样", "offline", 0.0);
-            if (gauge.Value == 1) return New("满电", "good", 1.0);
-            if (gauge.Value <= 4) return New("良好", "good", Math.Max(0.25, 1.0 - ((gauge.Value - 1) * 0.25)));
-            if (gauge.Value == 5) return New("电量低", "caution", 0.25);
-            if (gauge.Value == 6) return New("电量很低", "warning", 0.0);
-            return New("极低", "critical", 0.0);
+            if (!gauge.HasValue || gauge.Value < 1 || gauge.Value > 7) return New("待采样", "offline", 0.0, null);
+            if (gauge.Value == 1) return New("满电", "good", 1.00, 100);
+            if (gauge.Value == 2) return New("良好", "good", 0.80, 80);
+            if (gauge.Value == 3) return New("良好", "good", 0.60, 60);
+            if (gauge.Value == 4) return New("良好", "good", 0.40, 40);
+            if (gauge.Value == 5) return New("电量低", "good", 0.20, 20);
+            if (gauge.Value == 6) return New("电量很低", "caution", 0.09, 9);
+            return New("极低", "critical", 0.05, 5);
         }
 
-        private static GaugeInfo New(string label, string tone, double fill)
+        private static GaugeInfo New(string label, string tone, double fill, int? estimatedPercent)
         {
-            return new GaugeInfo { Label = label, Tone = tone, Fill = fill };
+            return new GaugeInfo {
+                Label = label,
+                Tone = tone,
+                Fill = fill,
+                EstimatedPercent = estimatedPercent
+            };
         }
     }
 
@@ -342,7 +361,7 @@ namespace DjiMicBattery
                     {
                         graphics.FillRectangle(brush, 6, 10, fillWidth, 12);
                     }
-                    else if (tone == "warning" || tone == "critical")
+                    else if (tone == "critical")
                     {
                         using (Font font = new Font("Segoe UI", 12, FontStyle.Bold, GraphicsUnit.Pixel))
                         {
@@ -367,7 +386,6 @@ namespace DjiMicBattery
         {
             if (tone == "good") return Color.FromArgb(54, 201, 110);
             if (tone == "caution") return Color.FromArgb(245, 166, 35);
-            if (tone == "warning") return Color.FromArgb(235, 75, 75);
             if (tone == "critical") return Color.FromArgb(220, 38, 38);
             return Color.FromArgb(145, 150, 160);
         }

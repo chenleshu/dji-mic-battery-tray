@@ -19,6 +19,7 @@ $running = Get-CimInstance Win32_Process | Where-Object {
 }
 foreach ($process in $running) {
     Stop-Process -Id $process.ProcessId -Force
+    Wait-Process -Id $process.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null

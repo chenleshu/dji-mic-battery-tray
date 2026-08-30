@@ -1,4 +1,5 @@
 /assets/app.ico
 /dist/
+/graphify-out/
 *.log
 status.txt
