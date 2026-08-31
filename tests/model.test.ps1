@@ -51,4 +51,35 @@ $passed++
 if ($tone -ne 'caution') { throw "9% 图标颜色等级错误：$tone" }
 $passed++
 
+$batteryVisualType = $assembly.GetType('DjiMicBattery.BatteryVisual', $true)
+$fromPercent = $batteryVisualType.GetMethod('FromPercent', [Reflection.BindingFlags]'Public,Static')
+$percentCases = @(
+    @{ Percent = 50; Tone = 'good'; Fill = 0.5 },
+    @{ Percent = 9; Tone = 'caution'; Fill = 0.09 },
+    @{ Percent = 6; Tone = 'caution'; Fill = 0.06 },
+    @{ Percent = 5; Tone = 'critical'; Fill = 0.05 },
+    @{ Percent = 0; Tone = 'critical'; Fill = 0.0 }
+)
+foreach ($case in $percentCases) {
+    $visual = $fromPercent.Invoke($null, @($case.Percent))
+    $actualTone = $batteryVisualType.GetProperty('Tone').GetValue($visual, $null)
+    $actualFill = $batteryVisualType.GetProperty('Fill').GetValue($visual, $null)
+    if ($actualTone -ne $case.Tone) { throw "$($case.Percent)% 的颜色应为 $($case.Tone)，实际为 $actualTone" }
+    if ([Math]::Abs($actualFill - $case.Fill) -gt 0.0001) { throw "$($case.Percent)% 的填充量错误：$actualFill" }
+    $passed += 2
+}
+
+$bluetoothResultType = $assembly.GetType('DjiMicBattery.BluetoothBatteryResult', $true)
+$bluetoothResult = [Activator]::CreateInstance($bluetoothResultType)
+$bluetoothResultType.GetProperty('Status').SetValue($bluetoothResult, 'ok', $null)
+$bluetoothResultType.GetProperty('DeviceName').SetValue($bluetoothResult, 'DJI Mic Mini-TEST Hands-Free AG', $null)
+$bluetoothResultType.GetProperty('BatteryPercent').SetValue($bluetoothResult, [Nullable[int]]50, $null)
+$bluetoothView = $trayViewType.GetMethod('FromBluetooth', [Reflection.BindingFlags]'Public,Static').Invoke($null, @($bluetoothResult))
+$bluetoothTooltip = $trayViewType.GetProperty('Tooltip').GetValue($bluetoothView, $null)
+$bluetoothSummary = $trayViewType.GetProperty('Summary').GetValue($bluetoothView, $null)
+if ($bluetoothTooltip -ne '大疆麦克风电量 | DJI Mic Mini-TEST Hands-Free AG | 蓝牙 50%') { throw "蓝牙悬停文字错误：$bluetoothTooltip" }
+$passed++
+if ($bluetoothSummary -ne '蓝牙 50%') { throw "蓝牙菜单摘要错误：$bluetoothSummary" }
+$passed++
+
 [pscustomobject]@{ Status = 'passed'; Assertions = $passed }

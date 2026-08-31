@@ -12,12 +12,12 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("大疆麦克风电量")]
-[assembly: AssemblyDescription("在 Windows 通知区域显示 DJI Mic Mini 发射器电量")]
+[assembly: AssemblyDescription("在 Windows 通知区域显示 DJI Mic Mini 的 USB 或蓝牙电量")]
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace DjiMicBattery
 {
@@ -129,17 +129,18 @@ namespace DjiMicBattery
             updating = true;
             try
             {
-                ReaderResult result = Reader.Read(3500);
-                TrayView view = TrayView.FromResult(result);
-                Icon oldIcon = notifyIcon.Icon;
-                notifyIcon.Icon = IconFactory.Create(view.Tone, view.Fill);
-                if (oldIcon != null)
+                BluetoothBatteryResult bluetooth = BluetoothBatteryReader.Read();
+                if (bluetooth.Status == "ok" || bluetooth.Status == "no_battery")
                 {
-                    oldIcon.Dispose();
+                    TrayView bluetoothView = TrayView.FromBluetooth(bluetooth);
+                    ApplyView(bluetoothView);
+                    WriteBluetoothStatus(bluetooth, bluetoothView);
+                    return;
                 }
 
-                notifyIcon.Text = LimitTooltip(view.Tooltip);
-                statusItem.Text = view.Summary;
+                ReaderResult result = Reader.Read(3500);
+                TrayView view = TrayView.FromResult(result);
+                ApplyView(view);
                 WriteStatus(result, view);
             }
             catch (Exception ex)
@@ -154,6 +155,19 @@ namespace DjiMicBattery
             }
         }
 
+        private void ApplyView(TrayView view)
+        {
+            Icon oldIcon = notifyIcon.Icon;
+            notifyIcon.Icon = IconFactory.Create(view.Tone, view.Fill);
+            if (oldIcon != null)
+            {
+                oldIcon.Dispose();
+            }
+
+            notifyIcon.Text = LimitTooltip(view.Tooltip);
+            statusItem.Text = view.Summary;
+        }
+
         private static string LimitTooltip(string text)
         {
             return text.Length <= 120 ? text : text.Substring(0, 120);
@@ -163,6 +177,7 @@ namespace DjiMicBattery
         {
             List<string> lines = new List<string>();
             lines.Add("应用=" + ProductNameZh);
+            lines.Add("连接方式=USB");
             lines.Add("状态=" + result.Status);
             lines.Add("摘要=" + view.Summary);
             lines.Add("提示=" + view.Tooltip);
@@ -177,6 +192,20 @@ namespace DjiMicBattery
                     tx.Charging
                 ));
             }
+            lines.Add("更新时间=" + DateTime.Now.ToString("o"));
+            File.WriteAllLines(statusPath, lines.ToArray(), new UTF8Encoding(false));
+        }
+
+        private void WriteBluetoothStatus(BluetoothBatteryResult result, TrayView view)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("应用=" + ProductNameZh);
+            lines.Add("连接方式=蓝牙");
+            lines.Add("状态=" + result.Status);
+            lines.Add("设备=" + result.DeviceName);
+            lines.Add("电量=" + (result.BatteryPercent.HasValue ? result.BatteryPercent.Value + "%" : "未知"));
+            lines.Add("摘要=" + view.Summary);
+            lines.Add("提示=" + view.Tooltip);
             lines.Add("更新时间=" + DateTime.Now.ToString("o"));
             File.WriteAllLines(statusPath, lines.ToArray(), new UTF8Encoding(false));
         }
@@ -249,6 +278,28 @@ namespace DjiMicBattery
         public string Tooltip { get; private set; }
         public string Summary { get; private set; }
 
+        public static TrayView FromBluetooth(BluetoothBatteryResult result)
+        {
+            if (!result.BatteryPercent.HasValue)
+            {
+                return New(
+                    "offline",
+                    0.0,
+                    ProductNameZh + " | " + result.DeviceName + " | 蓝牙已连接 · 电量未知",
+                    "蓝牙已连接 · 电量未知"
+                );
+            }
+
+            BatteryVisual visual = BatteryVisual.FromPercent(result.BatteryPercent.Value);
+            string percentage = result.BatteryPercent.Value + "%";
+            return New(
+                visual.Tone,
+                visual.Fill,
+                ProductNameZh + " | " + result.DeviceName + " | 蓝牙 " + percentage,
+                "蓝牙 " + percentage
+            );
+        }
+
         public static TrayView FromResult(ReaderResult result)
         {
             if (result.Status == "ok")
@@ -303,6 +354,19 @@ namespace DjiMicBattery
         private static TrayView New(string tone, double fill, string tooltip, string summary)
         {
             return new TrayView { Tone = tone, Fill = fill, Tooltip = tooltip, Summary = summary };
+        }
+    }
+
+    internal sealed class BatteryVisual
+    {
+        public string Tone { get; private set; }
+        public double Fill { get; private set; }
+
+        public static BatteryVisual FromPercent(int percent)
+        {
+            int bounded = Math.Max(0, Math.Min(100, percent));
+            string tone = bounded <= 5 ? "critical" : bounded < 10 ? "caution" : "good";
+            return new BatteryVisual { Tone = tone, Fill = bounded / 100.0 };
         }
     }
 

@@ -1,17 +1,20 @@
 # 大疆麦克风电量
 
-在 Windows 通知区域实时显示 DJI Mic Mini 发射器电量的轻量托盘程序。
+在 Windows 通知区域实时显示 DJI Mic Mini 电量的轻量托盘程序，支持蓝牙连接和 USB 接收器连接。
 
 完整的安装、使用、升级、故障排查和技术边界请参阅：[软件说明](docs/软件说明.md)。
 
 ## 功能
 
 - Windows 通知区域电池图标，颜色和填充量跟随电量档位
+- 蓝牙连接时读取 Windows HFP 电池指示并显示设备上报的百分比
 - 悬停显示 TX1/TX2 估算百分比与充电状态
 - 正常电量使用绿色；估算低于 10% 使用橙色；5% 使用红色
 - 右键菜单支持立即刷新、开机自动启动和退出
-- 每 8 秒读取一次 DJI 接收器状态
+- 每 8 秒自动刷新；蓝牙在线时优先显示蓝牙电量，否则读取 USB 接收器
 - 保持 USB Audio 接口原驱动，不影响麦克风录音
+
+蓝牙模式不需要 WinUSB。当前实机已验证 `DJI Mic Mini-62D525` 的免提录音端点和电量显示；设备通过 HFP 向 Windows 上报的是百分比，因此不会标注“约”。
 
 DJI USB 协议返回的是 1–7 档电量状态，不是精确百分比。悬停显示的百分比会明确标注“约”，采用以下粗略映射：
 
@@ -30,8 +33,8 @@ DJI USB 协议返回的是 1–7 档电量状态，不是精确百分比。悬�
 ## 系统要求
 
 - Windows 10/11 x64
-- DJI Mic Mini 接收器 USB 数据接口（Interface 6）使用 WinUSB
-- 音频接口保持原有 Windows USB Audio 驱动
+- 蓝牙模式：DJI Mic Mini 已在 Windows 中配对，并启用 `Hands-Free` 录音端点
+- USB 模式：接收器 Interface 6 使用 WinUSB，音频接口保持 Windows USB Audio 驱动
 
 ## 使用发行版
 
@@ -62,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 
 ## 实现说明
 
-程序只读访问 `VID_2CA3&PID_4011` 的 Interface 6，通过 WinUSB 的 bulk-IN `0x86` 读取状态帧。协议识别参考了开源项目 [ShadowBitBasher/DJI-Mic-Control](https://github.com/ShadowBitBasher/DJI-Mic-Control)。
+蓝牙模式只读访问 DJI `Hands-Free AG` 设备节点上的 Windows HFP 电池属性。USB 模式只读访问 `VID_2CA3&PID_4011` 的 Interface 6，通过 WinUSB 的 bulk-IN `0x86` 读取状态帧。协议识别参考了开源项目 [ShadowBitBasher/DJI-Mic-Control](https://github.com/ShadowBitBasher/DJI-Mic-Control)。
 
 ## 许可证
 

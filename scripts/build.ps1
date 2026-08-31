@@ -59,6 +59,7 @@ $arguments = @(
     '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
     (Join-Path $sourceRoot 'Program.cs'),
+    (Join-Path $sourceRoot 'DjiMicBluetooth.cs'),
     (Join-Path $sourceRoot 'DjiMicWinUsb.cs')
 )
 
