@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Win32;
 
@@ -16,6 +17,14 @@ namespace DjiMicBattery
         public bool Connected { get; set; }
         public int? BatteryGauge { get; set; }
         public bool Charging { get; set; }
+        public string SerialNumber { get; set; }
+        public string ProductName { get; set; }
+
+        public TransmitterState()
+        {
+            SerialNumber = "";
+            ProductName = "";
+        }
     }
 
     public sealed class ReaderResult
@@ -26,6 +35,8 @@ namespace DjiMicBattery
         public List<TransmitterState> Transmitters { get; set; }
         public string SampledAt { get; set; }
         public string DeviceId { get; set; }
+        public string ReceiverSerial { get; set; }
+        public string ReceiverProductName { get; set; }
 
         public ReaderResult()
         {
@@ -34,6 +45,8 @@ namespace DjiMicBattery
             Transmitters = new List<TransmitterState>();
             SampledAt = DateTime.UtcNow.ToString("o");
             DeviceId = "";
+            ReceiverSerial = "";
+            ReceiverProductName = "";
         }
     }
 
@@ -114,10 +127,10 @@ namespace DjiMicBattery
                 {
                     continue;
                 }
-                latest = decoded;
-                if (decoded.Status == "unsupported_firmware" || HasBattery(decoded))
+                latest = MergeResult(latest, decoded);
+                if (latest.Status == "unsupported_firmware")
                 {
-                    return decoded;
+                    return latest;
                 }
             }
             return latest ?? Result("no_data", "未找到有效的 DJI 状态帧");
@@ -175,14 +188,15 @@ namespace DjiMicBattery
                         {
                             continue;
                         }
-                        latest = decoded;
-                        if (decoded.Status == "unsupported_firmware" || HasBattery(decoded))
+                        latest = MergeResult(latest, decoded);
+                        if (latest.Status == "unsupported_firmware" ||
+                            (HasBattery(latest) && HasIdentityForConnected(latest)))
                         {
-                            return decoded;
+                            return latest;
                         }
-                        if (decoded.Status == "ok" && decoded.Transmitters.All(tx => !tx.Connected))
+                        if (latest.Status == "ok" && latest.Transmitters.All(tx => !tx.Connected))
                         {
-                            return decoded;
+                            return latest;
                         }
                     }
                 }
@@ -205,6 +219,62 @@ namespace DjiMicBattery
         private static bool HasBattery(ReaderResult result)
         {
             return result.Transmitters.Any(tx => tx.Connected && tx.BatteryGauge.HasValue && tx.BatteryGauge.Value > 0);
+        }
+
+        private static bool HasIdentityForConnected(ReaderResult result)
+        {
+            List<TransmitterState> connected = result.Transmitters.Where(tx => tx.Connected).ToList();
+            return connected.Count > 0 &&
+                !string.IsNullOrWhiteSpace(result.ReceiverSerial) &&
+                connected.All(tx => !string.IsNullOrWhiteSpace(tx.SerialNumber) &&
+                    !string.IsNullOrWhiteSpace(tx.ProductName));
+        }
+
+        private static ReaderResult MergeResult(ReaderResult current, ReaderResult update)
+        {
+            if (update.Status == "unsupported_firmware")
+            {
+                return update;
+            }
+            if (current == null)
+            {
+                current = Result("no_data", "等待 DJI 状态数据");
+            }
+
+            current.ProtocolVersion = update.ProtocolVersion ?? current.ProtocolVersion;
+            if (!string.IsNullOrWhiteSpace(update.ReceiverSerial)) current.ReceiverSerial = update.ReceiverSerial;
+            if (!string.IsNullOrWhiteSpace(update.ReceiverProductName)) current.ReceiverProductName = update.ReceiverProductName;
+
+            if (update.Status == "ok")
+            {
+                List<TransmitterState> merged = new List<TransmitterState>();
+                foreach (TransmitterState statusTx in update.Transmitters.OrderBy(tx => tx.Slot))
+                {
+                    TransmitterState identity = current.Transmitters.FirstOrDefault(tx => tx.Slot == statusTx.Slot);
+                    if (identity != null)
+                    {
+                        statusTx.SerialNumber = identity.SerialNumber;
+                        statusTx.ProductName = identity.ProductName;
+                    }
+                    merged.Add(statusTx);
+                }
+                current.Transmitters = merged;
+                current.Status = update.Status;
+                current.Message = update.Message;
+                current.SampledAt = update.SampledAt;
+                return current;
+            }
+
+            if (update.Status == "identity")
+            {
+                foreach (TransmitterState identity in update.Transmitters)
+                {
+                    TransmitterState target = EnsureTransmitter(current, identity.Slot);
+                    if (!string.IsNullOrWhiteSpace(identity.SerialNumber)) target.SerialNumber = identity.SerialNumber;
+                    if (!string.IsNullOrWhiteSpace(identity.ProductName)) target.ProductName = identity.ProductName;
+                }
+            }
+            return current;
         }
 
         private static ReaderResult DecodeFrame(byte[] frame)
@@ -234,49 +304,125 @@ namespace DjiMicBattery
 
             const int headerLength = 52;
             const int slotLength = 32;
-            if (frame.Length < headerLength + 2)
+            if (frame.Length >= headerLength + 2)
             {
-                return null;
+                int remainder = frame.Length - (headerLength + 2);
+                if (remainder >= 0 && remainder % slotLength == 0 && remainder / slotLength <= 2)
+                {
+                    int slotCount = Math.Min(2, remainder / slotLength);
+                    byte connected = frame[44];
+                    ReaderResult result = Result("ok", "DJI Mic 状态读取成功");
+                    result.ProtocolVersion = 2;
+                    for (int i = 0; i < 2; i++)
+                    {
+                        result.Transmitters.Add(new TransmitterState
+                        {
+                            Slot = i + 1,
+                            Connected = (connected & (1 << i)) != 0,
+                            BatteryGauge = null,
+                            Charging = false
+                        });
+                    }
+
+                    for (int slotPosition = 0; slotPosition < slotCount; slotPosition++)
+                    {
+                        int offset = headerLength + slotLength * slotPosition;
+                        int unit = frame[offset + 1];
+                        if (unit < 1 || unit > 2)
+                        {
+                            continue;
+                        }
+                        TransmitterState tx = result.Transmitters[unit - 1];
+                        if (!tx.Connected)
+                        {
+                            continue;
+                        }
+                        byte flags = frame[offset + 7];
+                        tx.Charging = (flags & 0x02) != 0;
+                        tx.BatteryGauge = (flags >> 2) & 0x07;
+                    }
+                    return result;
+                }
             }
-            int remainder = frame.Length - (headerLength + 2);
-            if (remainder < 0 || remainder % slotLength != 0)
+            return DecodeIdentityFrame(frame);
+        }
+
+        private static ReaderResult DecodeIdentityFrame(byte[] frame)
+        {
+            const int recordsStart = 14;
+            const int recordHeaderLength = 6;
+            if (frame.Length < recordsStart + recordHeaderLength + 2)
             {
                 return null;
             }
 
-            int slotCount = Math.Min(2, remainder / slotLength);
-            byte connected = frame[44];
-            ReaderResult result = Result("ok", "DJI Mic Mini 状态读取成功");
+            ReaderResult result = Result("identity", "DJI Mic 身份信息读取成功");
             result.ProtocolVersion = 2;
-            for (int i = 0; i < 2; i++)
+            int end = frame.Length - 2;
+            int offset = recordsStart;
+            bool matched = false;
+            while (offset + recordHeaderLength <= end)
             {
-                result.Transmitters.Add(new TransmitterState
-                {
-                    Slot = i + 1,
-                    Connected = (connected & (1 << i)) != 0,
-                    BatteryGauge = null,
-                    Charging = false
-                });
-            }
-
-            for (int slotPosition = 0; slotPosition < slotCount; slotPosition++)
-            {
-                int offset = headerLength + slotLength * slotPosition;
+                int tag = frame[offset];
                 int unit = frame[offset + 1];
-                if (unit < 1 || unit > 2)
+                int length = frame[offset + 5];
+                int dataStart = offset + recordHeaderLength;
+                int dataEnd = dataStart + length;
+                if (dataEnd > end)
                 {
-                    continue;
+                    return null;
                 }
-                TransmitterState tx = result.Transmitters[unit - 1];
-                if (!tx.Connected)
+
+                if (tag == 0x01 && length > 4)
                 {
-                    continue;
+                    string serial = ReadAscii(frame, dataStart + 4, length - 4);
+                    if (unit == 0)
+                    {
+                        result.ReceiverSerial = serial;
+                    }
+                    else if (unit == 1 || unit == 2)
+                    {
+                        EnsureTransmitter(result, unit).SerialNumber = serial;
+                    }
+                    matched = true;
                 }
-                byte flags = frame[offset + 7];
-                tx.Charging = (flags & 0x02) != 0;
-                tx.BatteryGauge = (flags >> 2) & 0x07;
+                else if (tag == 0x06)
+                {
+                    string productName = ReadAscii(frame, dataStart, length);
+                    if (unit == 0)
+                    {
+                        result.ReceiverProductName = productName;
+                    }
+                    else if (unit == 1 || unit == 2)
+                    {
+                        EnsureTransmitter(result, unit).ProductName = productName;
+                    }
+                    matched = true;
+                }
+                offset = dataEnd;
             }
-            return result;
+            return matched ? result : null;
+        }
+
+        private static TransmitterState EnsureTransmitter(ReaderResult result, int slot)
+        {
+            TransmitterState transmitter = result.Transmitters.FirstOrDefault(tx => tx.Slot == slot);
+            if (transmitter == null)
+            {
+                transmitter = new TransmitterState { Slot = slot };
+                result.Transmitters.Add(transmitter);
+            }
+            return transmitter;
+        }
+
+        private static string ReadAscii(byte[] data, int offset, int length)
+        {
+            int actualLength = 0;
+            while (actualLength < length && data[offset + actualLength] != 0)
+            {
+                actualLength++;
+            }
+            return Encoding.ASCII.GetString(data, offset, actualLength).Trim();
         }
 
         private static byte[] TakeFrame(List<byte> buffer)

@@ -16,8 +16,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 namespace DjiMicBattery
 {
@@ -74,6 +74,8 @@ namespace DjiMicBattery
 
             detailsItem = new ToolStripMenuItem("设备详情");
             detailsItem.Enabled = false;
+            detailsItem.DropDown.ImageScalingSize = new Size(58, 22);
+            detailsItem.DropDown.MinimumSize = new Size(470, 0);
 
             ToolStripMenuItem titleItem = new ToolStripMenuItem(ProductNameZh);
             titleItem.Enabled = false;
@@ -162,14 +164,46 @@ namespace DjiMicBattery
 
             notifyIcon.Text = LimitTooltip(view.Tooltip);
             statusItem.Text = view.Summary;
-            detailsItem.DropDownItems.Clear();
-            foreach (string line in view.DetailLines)
+            if (detailsItem.DropDown.Visible)
             {
-                ToolStripMenuItem item = new ToolStripMenuItem(line);
-                item.Enabled = false;
-                detailsItem.DropDownItems.Add(item);
+                return;
+            }
+            DisposeDetailItems();
+            for (int groupIndex = 0; groupIndex < view.DetailGroups.Count; groupIndex++)
+            {
+                TrayDetailGroup group = view.DetailGroups[groupIndex];
+                if (groupIndex > 0)
+                {
+                    detailsItem.DropDownItems.Add(new ToolStripSeparator());
+                }
+                ToolStripMenuItem header = new ToolStripMenuItem(group.Title);
+                header.Enabled = false;
+                header.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
+                detailsItem.DropDownItems.Add(header);
+                foreach (TrayDetailRow row in group.Rows)
+                {
+                    ToolStripMenuItem item = new ToolStripMenuItem(row.Text);
+                    item.Image = BatteryBadgeFactory.Create(row.BatteryPercent, row.Approximate);
+                    item.ImageScaling = ToolStripItemImageScaling.None;
+                    detailsItem.DropDownItems.Add(item);
+                }
             }
             detailsItem.Enabled = detailsItem.DropDownItems.Count > 0;
+        }
+
+        private void DisposeDetailItems()
+        {
+            while (detailsItem.DropDownItems.Count > 0)
+            {
+                ToolStripItem item = detailsItem.DropDownItems[0];
+                detailsItem.DropDownItems.RemoveAt(0);
+                if (item.Image != null)
+                {
+                    item.Image.Dispose();
+                    item.Image = null;
+                }
+                item.Dispose();
+            }
         }
 
         private static string LimitTooltip(string text)
@@ -189,11 +223,13 @@ namespace DjiMicBattery
             {
                 MicrophoneStatus mic = snapshot.Microphones[i];
                 lines.Add(string.Format(
-                    "麦克风{0}=标签:{1};来源:{2};设备:{3};电量:{4};档位:{5};充电:{6}",
+                    "麦克风{0}=标签:{1};来源:{2};产品:{3};识别号:{4};接收器序列:{5};电量:{6};档位:{7};充电:{8}",
                     i + 1,
                     mic.Label,
-                    mic.Source,
-                    mic.DeviceName,
+                    FormatSource(mic.Source),
+                    mic.ProductType,
+                    mic.SerialNumber,
+                    mic.ReceiverSerial,
                     FormatBattery(mic),
                     mic.BatteryGauge.HasValue ? mic.BatteryGauge.Value.ToString() : "",
                     mic.Charging
@@ -211,6 +247,11 @@ namespace DjiMicBattery
         {
             if (!mic.BatteryPercent.HasValue) return "未知";
             return (mic.Approximate ? "约" : "") + mic.BatteryPercent.Value + "%";
+        }
+
+        private static string FormatSource(string source)
+        {
+            return source == "Bluetooth" ? "蓝牙" : source;
         }
 
         private void WriteLog(string message)
@@ -274,13 +315,32 @@ namespace DjiMicBattery
         }
     }
 
+    internal sealed class TrayDetailRow
+    {
+        public string Text { get; set; }
+        public int? BatteryPercent { get; set; }
+        public bool Approximate { get; set; }
+    }
+
+    internal sealed class TrayDetailGroup
+    {
+        public string Title { get; set; }
+        public List<TrayDetailRow> Rows { get; private set; }
+
+        public TrayDetailGroup()
+        {
+            Title = "";
+            Rows = new List<TrayDetailRow>();
+        }
+    }
+
     internal sealed class TrayView
     {
         public string Tone { get; private set; }
         public double Fill { get; private set; }
         public string Tooltip { get; private set; }
         public string Summary { get; private set; }
-        public List<string> DetailLines { get; private set; }
+        public List<TrayDetailGroup> DetailGroups { get; private set; }
 
         public static TrayView FromSnapshot(MicStatusSnapshot snapshot)
         {
@@ -288,10 +348,7 @@ namespace DjiMicBattery
                 .Where(mic => mic.BatteryPercent.HasValue)
                 .OrderBy(mic => mic.BatteryPercent.Value)
                 .ToList();
-            List<string> details = snapshot.Microphones
-                .Select(DetailLine)
-                .Concat(snapshot.Notices)
-                .ToList();
+            List<TrayDetailGroup> detailGroups = BuildDetailGroups(snapshot);
 
             if (known.Count == 0)
             {
@@ -303,7 +360,7 @@ namespace DjiMicBattery
                     0.0,
                     ProductNameZh + " | " + fallback,
                     fallback,
-                    details
+                    detailGroups
                 );
             }
 
@@ -320,7 +377,7 @@ namespace DjiMicBattery
                 visual.Fill,
                 tooltip,
                 summary,
-                details
+                detailGroups
             );
         }
 
@@ -350,25 +407,84 @@ namespace DjiMicBattery
             return mic.Label + " " + battery + (mic.Charging ? " ⚡" : "");
         }
 
-        private static string DetailLine(MicrophoneStatus mic)
+        private static List<TrayDetailGroup> BuildDetailGroups(MicStatusSnapshot snapshot)
         {
-            string sourceName = mic.Source == "蓝牙" && !string.IsNullOrWhiteSpace(mic.DeviceName)
-                ? mic.DeviceName
-                : mic.Label;
-            string battery = mic.BatteryPercent.HasValue
-                ? (mic.Approximate ? "约 " : "") + mic.BatteryPercent.Value + "%"
-                : "电量未知";
-            return sourceName + " · " + battery + (mic.Charging ? " · 充电中" : "");
+            List<TrayDetailGroup> groups = new List<TrayDetailGroup>();
+            List<MicrophoneStatus> bluetooth = snapshot.Microphones
+                .Where(mic => mic.Source == "Bluetooth")
+                .OrderBy(mic => mic.SerialNumber)
+                .ToList();
+            if (bluetooth.Count > 0)
+            {
+                TrayDetailGroup group = new TrayDetailGroup { Title = "蓝牙连接（" + bluetooth.Count + " 支）" };
+                foreach (MicrophoneStatus mic in bluetooth)
+                {
+                    group.Rows.Add(DetailRow(mic));
+                }
+                groups.Add(group);
+            }
+
+            IEnumerable<IGrouping<string, MicrophoneStatus>> usbGroups = snapshot.Microphones
+                .Where(mic => mic.Source == "USB")
+                .GroupBy(mic => mic.DeviceId)
+                .OrderBy(group => group.First().Label);
+            foreach (IGrouping<string, MicrophoneStatus> usbGroup in usbGroups)
+            {
+                List<MicrophoneStatus> microphones = usbGroup.OrderBy(mic => mic.Label).ToList();
+                MicrophoneStatus first = microphones[0];
+                string receiver = first.Label.Split('/')[0] + " 接收器";
+                if (!string.IsNullOrWhiteSpace(first.ReceiverProductType))
+                {
+                    receiver += " · " + first.ReceiverProductType;
+                }
+                receiver += " · SN " + ValueOrUnknown(first.ReceiverSerial);
+                receiver += "（" + microphones.Count + " 支）";
+                TrayDetailGroup group = new TrayDetailGroup { Title = receiver };
+                foreach (MicrophoneStatus mic in microphones)
+                {
+                    group.Rows.Add(DetailRow(mic));
+                }
+                groups.Add(group);
+            }
+
+            if (snapshot.Notices.Count > 0)
+            {
+                TrayDetailGroup notices = new TrayDetailGroup { Title = "状态提示" };
+                foreach (string notice in snapshot.Notices)
+                {
+                    notices.Rows.Add(new TrayDetailRow { Text = notice, BatteryPercent = null, Approximate = false });
+                }
+                groups.Add(notices);
+            }
+            return groups;
         }
 
-        private static TrayView New(string tone, double fill, string tooltip, string summary, List<string> detailLines)
+        private static TrayDetailRow DetailRow(MicrophoneStatus mic)
+        {
+            string role = mic.Source == "Bluetooth" ? "蓝牙麦克风" : mic.Label.Split('/').Last();
+            string text = role + " · " + ValueOrUnknown(mic.ProductType) + " · 识别号 " + ValueOrUnknown(mic.SerialNumber);
+            if (mic.Approximate) text += " · 约值";
+            if (mic.Charging) text += " · 充电中";
+            return new TrayDetailRow {
+                Text = text,
+                BatteryPercent = mic.BatteryPercent,
+                Approximate = mic.Approximate
+            };
+        }
+
+        private static string ValueOrUnknown(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "未识别" : value;
+        }
+
+        private static TrayView New(string tone, double fill, string tooltip, string summary, List<TrayDetailGroup> detailGroups)
         {
             return new TrayView {
                 Tone = tone,
                 Fill = fill,
                 Tooltip = tooltip,
                 Summary = summary,
-                DetailLines = detailLines
+                DetailGroups = detailGroups
             };
         }
     }
@@ -462,12 +578,55 @@ namespace DjiMicBattery
             }
         }
 
-        private static Color ToneColor(string tone)
+        internal static Color ToneColor(string tone)
         {
             if (tone == "good") return Color.FromArgb(54, 201, 110);
             if (tone == "caution") return Color.FromArgb(245, 166, 35);
             if (tone == "critical") return Color.FromArgb(220, 38, 38);
             return Color.FromArgb(145, 150, 160);
+        }
+    }
+
+    internal static class BatteryBadgeFactory
+    {
+        public static Bitmap Create(int? percent, bool approximate)
+        {
+            const int width = 58;
+            const int height = 22;
+            Bitmap bitmap = new Bitmap(width, height);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                graphics.Clear(Color.Transparent);
+
+                int bounded = percent.HasValue ? Math.Max(0, Math.Min(100, percent.Value)) : 0;
+                string tone = percent.HasValue ? BatteryVisual.FromPercent(bounded).Tone : "offline";
+                Color color = IconFactory.ToneColor(tone);
+                Rectangle body = new Rectangle(1, 2, 53, 18);
+                using (SolidBrush background = new SolidBrush(Color.FromArgb(64, 68, 76)))
+                using (SolidBrush fill = new SolidBrush(color))
+                using (SolidBrush terminal = new SolidBrush(color))
+                using (Pen outline = new Pen(color, 1.5f))
+                using (SolidBrush textBrush = new SolidBrush(Color.White))
+                using (Font font = new Font("Segoe UI", 7.2f, FontStyle.Bold, GraphicsUnit.Point))
+                {
+                    graphics.FillRectangle(background, body);
+                    int fillWidth = percent.HasValue ? (int)Math.Round(49 * bounded / 100.0) : 0;
+                    if (fillWidth > 0)
+                    {
+                        graphics.FillRectangle(fill, 3, 4, fillWidth, 14);
+                    }
+                    graphics.DrawRectangle(outline, body);
+                    graphics.FillRectangle(terminal, 55, 7, 3, 8);
+                    string label = percent.HasValue
+                        ? (approximate ? "~" : "") + bounded + "%"
+                        : "--";
+                    SizeF textSize = graphics.MeasureString(label, font);
+                    graphics.DrawString(label, font, textBrush, 27 - textSize.Width / 2, 11 - textSize.Height / 2);
+                }
+            }
+            return bitmap;
         }
     }
 }

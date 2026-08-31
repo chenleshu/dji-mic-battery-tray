@@ -13,12 +13,16 @@ namespace DjiMicBattery
         public string DeviceName { get; set; }
         public int? BatteryPercent { get; set; }
         public string InstanceId { get; set; }
+        public string ProductName { get; set; }
+        public string SerialNumber { get; set; }
 
         public BluetoothBatteryResult()
         {
             Status = "no_device";
             DeviceName = "";
             InstanceId = "";
+            ProductName = "";
+            SerialNumber = "";
         }
     }
 
@@ -149,6 +153,10 @@ namespace DjiMicBattery
             {
                 normalized = normalized.Substring(0, normalized.Length - 3).Trim();
             }
+            if (normalized.EndsWith(" Hands-Free", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = normalized.Substring(0, normalized.Length - 11).Trim();
+            }
             return normalized;
         }
 
@@ -211,12 +219,35 @@ namespace DjiMicBattery
 
         private static BluetoothBatteryResult New(string status, string name, int? percent, string instanceId)
         {
+            string productName;
+            string serialNumber;
+            ReadIdentity(name, out productName, out serialNumber);
             return new BluetoothBatteryResult {
                 Status = status,
                 DeviceName = name,
                 BatteryPercent = percent,
-                InstanceId = instanceId
+                InstanceId = instanceId,
+                ProductName = productName,
+                SerialNumber = serialNumber
             };
+        }
+
+        private static void ReadIdentity(string deviceName, out string productName, out string serialNumber)
+        {
+            string normalized = NormalizeName(deviceName);
+            int separator = normalized.LastIndexOf('-');
+            if (separator > 0 && separator < normalized.Length - 1)
+            {
+                string candidate = normalized.Substring(separator + 1).Trim();
+                if (candidate.Length >= 4 && candidate.Length <= 20 && candidate.IndexOf(' ') < 0)
+                {
+                    productName = normalized.Substring(0, separator).Trim();
+                    serialNumber = candidate;
+                    return;
+                }
+            }
+            productName = normalized;
+            serialNumber = "";
         }
 
         [StructLayout(LayoutKind.Sequential)]

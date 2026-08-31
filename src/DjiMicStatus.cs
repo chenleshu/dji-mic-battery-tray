@@ -15,6 +15,10 @@ namespace DjiMicBattery
         public bool Charging { get; set; }
         public int? BatteryGauge { get; set; }
         public int? ProtocolVersion { get; set; }
+        public string ProductType { get; set; }
+        public string SerialNumber { get; set; }
+        public string ReceiverSerial { get; set; }
+        public string ReceiverProductType { get; set; }
 
         public MicrophoneStatus()
         {
@@ -22,6 +26,10 @@ namespace DjiMicBattery
             Label = "";
             DeviceName = "";
             DeviceId = "";
+            ProductType = "";
+            SerialNumber = "";
+            ReceiverSerial = "";
+            ReceiverProductType = "";
         }
     }
 
@@ -54,12 +62,14 @@ namespace DjiMicBattery
             {
                 BluetoothBatteryResult item = activeBluetooth[i];
                 snapshot.Microphones.Add(new MicrophoneStatus {
-                    Source = "蓝牙",
+                    Source = "Bluetooth",
                     Label = activeBluetooth.Count == 1 ? "蓝牙" : "蓝牙" + (i + 1),
                     DeviceName = item.DeviceName,
                     DeviceId = item.InstanceId,
                     BatteryPercent = item.BatteryPercent,
-                    Approximate = false
+                    Approximate = false,
+                    ProductType = item.ProductName,
+                    SerialNumber = item.SerialNumber
                 });
             }
 
@@ -90,7 +100,11 @@ namespace DjiMicBattery
                             Approximate = true,
                             Charging = tx.Charging,
                             BatteryGauge = tx.BatteryGauge,
-                            ProtocolVersion = receiver.ProtocolVersion
+                            ProtocolVersion = receiver.ProtocolVersion,
+                            ProductType = tx.ProductName,
+                            SerialNumber = tx.SerialNumber,
+                            ReceiverSerial = receiver.ReceiverSerial,
+                            ReceiverProductType = receiver.ReceiverProductName
                         });
                     }
                 }
