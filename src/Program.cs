@@ -12,12 +12,12 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("大疆麦克风电量")]
-[assembly: AssemblyDescription("在 Windows 通知区域显示 DJI Mic Mini 的 USB 或蓝牙电量")]
+[assembly: AssemblyDescription("在 Windows 通知区域聚合显示一个或多个 DJI 麦克风的 USB 与蓝牙电量")]
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 
 namespace DjiMicBattery
 {
@@ -49,6 +49,7 @@ namespace DjiMicBattery
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private readonly NotifyIcon notifyIcon;
         private readonly ToolStripMenuItem statusItem;
+        private readonly ToolStripMenuItem detailsItem;
         private readonly ToolStripMenuItem autostartItem;
         private readonly System.Windows.Forms.Timer timer;
         private readonly string executablePath;
@@ -70,6 +71,9 @@ namespace DjiMicBattery
 
             statusItem = new ToolStripMenuItem("正在读取…");
             statusItem.Enabled = false;
+
+            detailsItem = new ToolStripMenuItem("设备详情");
+            detailsItem.Enabled = false;
 
             ToolStripMenuItem titleItem = new ToolStripMenuItem(ProductNameZh);
             titleItem.Enabled = false;
@@ -99,6 +103,7 @@ namespace DjiMicBattery
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Items.Add(titleItem);
             menu.Items.Add(statusItem);
+            menu.Items.Add(detailsItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(refreshItem);
             menu.Items.Add(autostartItem);
@@ -129,19 +134,10 @@ namespace DjiMicBattery
             updating = true;
             try
             {
-                BluetoothBatteryResult bluetooth = BluetoothBatteryReader.Read();
-                if (bluetooth.Status == "ok" || bluetooth.Status == "no_battery")
-                {
-                    TrayView bluetoothView = TrayView.FromBluetooth(bluetooth);
-                    ApplyView(bluetoothView);
-                    WriteBluetoothStatus(bluetooth, bluetoothView);
-                    return;
-                }
-
-                ReaderResult result = Reader.Read(3500);
-                TrayView view = TrayView.FromResult(result);
+                MicStatusSnapshot snapshot = MicStatusReader.Read(3500);
+                TrayView view = TrayView.FromSnapshot(snapshot);
                 ApplyView(view);
-                WriteStatus(result, view);
+                WriteStatus(snapshot, view);
             }
             catch (Exception ex)
             {
@@ -166,6 +162,14 @@ namespace DjiMicBattery
 
             notifyIcon.Text = LimitTooltip(view.Tooltip);
             statusItem.Text = view.Summary;
+            detailsItem.DropDownItems.Clear();
+            foreach (string line in view.DetailLines)
+            {
+                ToolStripMenuItem item = new ToolStripMenuItem(line);
+                item.Enabled = false;
+                detailsItem.DropDownItems.Add(item);
+            }
+            detailsItem.Enabled = detailsItem.DropDownItems.Count > 0;
         }
 
         private static string LimitTooltip(string text)
@@ -173,41 +177,40 @@ namespace DjiMicBattery
             return text.Length <= 120 ? text : text.Substring(0, 120);
         }
 
-        private void WriteStatus(ReaderResult result, TrayView view)
+        private void WriteStatus(MicStatusSnapshot snapshot, TrayView view)
         {
             List<string> lines = new List<string>();
             lines.Add("应用=" + ProductNameZh);
-            lines.Add("连接方式=USB");
-            lines.Add("状态=" + result.Status);
+            lines.Add("状态=" + (snapshot.Microphones.Count > 0 ? "ok" : "no_device"));
+            lines.Add("麦克风数=" + snapshot.Microphones.Count);
             lines.Add("摘要=" + view.Summary);
             lines.Add("提示=" + view.Tooltip);
-            lines.Add("协议=" + (result.ProtocolVersion.HasValue ? result.ProtocolVersion.Value.ToString() : ""));
-            foreach (TransmitterState tx in result.Transmitters.OrderBy(item => item.Slot))
+            for (int i = 0; i < snapshot.Microphones.Count; i++)
             {
+                MicrophoneStatus mic = snapshot.Microphones[i];
                 lines.Add(string.Format(
-                    "TX{0}=连接:{1};档位:{2};充电:{3}",
-                    tx.Slot,
-                    tx.Connected,
-                    tx.BatteryGauge.HasValue ? tx.BatteryGauge.Value.ToString() : "",
-                    tx.Charging
+                    "麦克风{0}=标签:{1};来源:{2};设备:{3};电量:{4};档位:{5};充电:{6}",
+                    i + 1,
+                    mic.Label,
+                    mic.Source,
+                    mic.DeviceName,
+                    FormatBattery(mic),
+                    mic.BatteryGauge.HasValue ? mic.BatteryGauge.Value.ToString() : "",
+                    mic.Charging
                 ));
+            }
+            for (int i = 0; i < snapshot.Notices.Count; i++)
+            {
+                lines.Add("提示" + (i + 1) + "=" + snapshot.Notices[i]);
             }
             lines.Add("更新时间=" + DateTime.Now.ToString("o"));
             File.WriteAllLines(statusPath, lines.ToArray(), new UTF8Encoding(false));
         }
 
-        private void WriteBluetoothStatus(BluetoothBatteryResult result, TrayView view)
+        private static string FormatBattery(MicrophoneStatus mic)
         {
-            List<string> lines = new List<string>();
-            lines.Add("应用=" + ProductNameZh);
-            lines.Add("连接方式=蓝牙");
-            lines.Add("状态=" + result.Status);
-            lines.Add("设备=" + result.DeviceName);
-            lines.Add("电量=" + (result.BatteryPercent.HasValue ? result.BatteryPercent.Value + "%" : "未知"));
-            lines.Add("摘要=" + view.Summary);
-            lines.Add("提示=" + view.Tooltip);
-            lines.Add("更新时间=" + DateTime.Now.ToString("o"));
-            File.WriteAllLines(statusPath, lines.ToArray(), new UTF8Encoding(false));
+            if (!mic.BatteryPercent.HasValue) return "未知";
+            return (mic.Approximate ? "约" : "") + mic.BatteryPercent.Value + "%";
         }
 
         private void WriteLog(string message)
@@ -277,83 +280,96 @@ namespace DjiMicBattery
         public double Fill { get; private set; }
         public string Tooltip { get; private set; }
         public string Summary { get; private set; }
+        public List<string> DetailLines { get; private set; }
 
-        public static TrayView FromBluetooth(BluetoothBatteryResult result)
+        public static TrayView FromSnapshot(MicStatusSnapshot snapshot)
         {
-            if (!result.BatteryPercent.HasValue)
+            List<MicrophoneStatus> known = snapshot.Microphones
+                .Where(mic => mic.BatteryPercent.HasValue)
+                .OrderBy(mic => mic.BatteryPercent.Value)
+                .ToList();
+            List<string> details = snapshot.Microphones
+                .Select(DetailLine)
+                .Concat(snapshot.Notices)
+                .ToList();
+
+            if (known.Count == 0)
             {
+                string fallback = snapshot.Microphones.Count > 0
+                    ? "已连接 " + snapshot.Microphones.Count + " 支麦克风 · 电量未知"
+                    : (snapshot.Notices.FirstOrDefault() ?? "未检测到已连接的大疆麦克风");
                 return New(
-                    "offline",
+                    fallback.IndexOf("WinUSB", StringComparison.OrdinalIgnoreCase) >= 0 ? "caution" : "offline",
                     0.0,
-                    ProductNameZh + " | " + result.DeviceName + " | 蓝牙已连接 · 电量未知",
-                    "蓝牙已连接 · 电量未知"
+                    ProductNameZh + " | " + fallback,
+                    fallback,
+                    details
                 );
             }
 
-            BatteryVisual visual = BatteryVisual.FromPercent(result.BatteryPercent.Value);
-            string percentage = result.BatteryPercent.Value + "%";
+            int minimum = known[0].BatteryPercent.Value;
+            bool approximateMinimum = known
+                .Where(mic => mic.BatteryPercent.Value == minimum)
+                .Any(mic => mic.Approximate);
+            BatteryVisual visual = BatteryVisual.FromPercent(minimum);
+            string minimumText = (approximateMinimum ? "约 " : "") + minimum + "%";
+            string summary = "最低" + minimumText + " · " + snapshot.Microphones.Count + " 支麦克风";
+            string tooltip = BuildTooltip(snapshot.Microphones, summary);
             return New(
                 visual.Tone,
                 visual.Fill,
-                ProductNameZh + " | " + result.DeviceName + " | 蓝牙 " + percentage,
-                "蓝牙 " + percentage
+                tooltip,
+                summary,
+                details
             );
         }
 
-        public static TrayView FromResult(ReaderResult result)
+        private static string BuildTooltip(List<MicrophoneStatus> microphones, string summary)
         {
-            if (result.Status == "ok")
+            List<string> parts = new List<string> { ProductNameZh };
+            foreach (MicrophoneStatus mic in microphones)
             {
-                List<TransmitterState> connected = result.Transmitters
-                    .Where(tx => tx.Connected)
-                    .OrderBy(tx => tx.Slot)
-                    .ToList();
-                if (connected.Count == 0)
+                string candidate = string.Join(" | ", parts.Concat(new[] { CompactLine(mic) }).ToArray());
+                if (candidate.Length > 116)
                 {
-                    return New("offline", 0.0, "大疆麦克风电量：接收器在线，发射器未连接", "接收器在线 · 发射器未连接");
+                    parts.Add(summary + "，右键查看全部");
+                    break;
                 }
-
-                List<string> tooltipParts = new List<string>();
-                List<string> summaryParts = new List<string>();
-                foreach (TransmitterState tx in connected)
-                {
-                    GaugeInfo info = GaugeInfo.FromGauge(tx.BatteryGauge);
-                    string charge = tx.Charging ? " ⚡" : "";
-                    string percentage = info.EstimatedPercent.HasValue
-                        ? "约 " + info.EstimatedPercent.Value + "%"
-                        : "待采样";
-                    tooltipParts.Add("TX" + tx.Slot + " " + percentage + charge);
-                    summaryParts.Add("TX" + tx.Slot + " " + info.Label + charge);
-                }
-
-                List<TransmitterState> known = connected
-                    .Where(tx => tx.BatteryGauge.HasValue && tx.BatteryGauge.Value >= 1 && tx.BatteryGauge.Value <= 7)
-                    .ToList();
-                GaugeInfo worst = known.Count == 0
-                    ? GaugeInfo.FromGauge(null)
-                    : GaugeInfo.FromGauge(known.Max(tx => tx.BatteryGauge.Value));
-                string summary = string.Join(" · ", summaryParts.ToArray());
-                return New(
-                    worst.Tone,
-                    worst.Fill,
-                    "大疆麦克风电量 | " + string.Join(" | ", tooltipParts.ToArray()),
-                    summary
-                );
+                parts.Add(CompactLine(mic));
             }
-
-            string fallback;
-            if (result.Status == "setup_required") fallback = "需为 Interface 6 安装 WinUSB";
-            else if (result.Status == "unsupported_firmware") fallback = "当前固件暂不提供 USB 电量";
-            else if (result.Status == "no_data") fallback = "等待大疆麦克风状态数据";
-            else fallback = "大疆麦克风电量读取失败";
-            return New(result.Status == "setup_required" ? "caution" : "offline", 0.0, ProductNameZh + "：" + fallback, fallback);
+            return string.Join(" | ", parts.ToArray());
         }
 
         private const string ProductNameZh = "大疆麦克风电量";
 
-        private static TrayView New(string tone, double fill, string tooltip, string summary)
+        private static string CompactLine(MicrophoneStatus mic)
         {
-            return new TrayView { Tone = tone, Fill = fill, Tooltip = tooltip, Summary = summary };
+            string battery = mic.BatteryPercent.HasValue
+                ? (mic.Approximate ? "约" : "") + mic.BatteryPercent.Value + "%"
+                : "未知";
+            return mic.Label + " " + battery + (mic.Charging ? " ⚡" : "");
+        }
+
+        private static string DetailLine(MicrophoneStatus mic)
+        {
+            string sourceName = mic.Source == "蓝牙" && !string.IsNullOrWhiteSpace(mic.DeviceName)
+                ? mic.DeviceName
+                : mic.Label;
+            string battery = mic.BatteryPercent.HasValue
+                ? (mic.Approximate ? "约 " : "") + mic.BatteryPercent.Value + "%"
+                : "电量未知";
+            return sourceName + " · " + battery + (mic.Charging ? " · 充电中" : "");
+        }
+
+        private static TrayView New(string tone, double fill, string tooltip, string summary, List<string> detailLines)
+        {
+            return new TrayView {
+                Tone = tone,
+                Fill = fill,
+                Tooltip = tooltip,
+                Summary = summary,
+                DetailLines = detailLines
+            };
         }
     }
 

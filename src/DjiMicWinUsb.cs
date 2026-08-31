@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace DjiMicBattery
@@ -24,6 +25,7 @@ namespace DjiMicBattery
         public int? ProtocolVersion { get; set; }
         public List<TransmitterState> Transmitters { get; set; }
         public string SampledAt { get; set; }
+        public string DeviceId { get; set; }
 
         public ReaderResult()
         {
@@ -31,6 +33,7 @@ namespace DjiMicBattery
             Message = "未知读取错误";
             Transmitters = new List<TransmitterState>();
             SampledAt = DateTime.UtcNow.ToString("o");
+            DeviceId = "";
         }
     }
 
@@ -40,51 +43,56 @@ namespace DjiMicBattery
         private const string DevicePathNeedle = "vid_2ca3&pid_4011&mi_06";
         private const byte BulkInEndpoint = 0x86;
 
-        public static ReaderResult Read(int timeoutMilliseconds)
+        public static List<ReaderResult> ReadAll(int timeoutMilliseconds)
         {
             try
             {
                 List<Guid> interfaceGuids = ReadInterfaceGuids();
                 if (interfaceGuids.Count == 0)
                 {
-                    return Result(
+                    return new List<ReaderResult> { Result(
                         "setup_required",
                         "DJI Mic Mini 数据接口尚未绑定 WinUSB。请只为 Interface 6 安装 WinUSB 驱动。"
-                    );
+                    ) };
                 }
 
                 List<string> paths = interfaceGuids
                     .SelectMany(EnumerateInterfacePaths)
                     .Where(path => path.IndexOf(DevicePathNeedle, StringComparison.OrdinalIgnoreCase) >= 0)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
                 if (paths.Count == 0)
                 {
-                    return Result(
+                    return new List<ReaderResult> { Result(
                         "setup_required",
                         "检测到 DJI 数据接口，但 Windows 尚未公开可访问的 WinUSB 设备路径。"
-                    );
+                    ) };
                 }
 
-                Exception last = null;
-                foreach (string path in paths)
-                {
-                    try
+                List<Task<ReaderResult>> tasks = paths
+                    .Select(path => Task.Factory.StartNew(delegate
                     {
-                        return ReadPath(path, Math.Max(800, timeoutMilliseconds));
-                    }
-                    catch (Exception exc)
-                    {
-                        last = exc;
-                    }
-                }
-
-                return Result("reader_error", last == null ? "无法打开 DJI 数据接口" : last.Message);
+                        ReaderResult result;
+                        try
+                        {
+                            result = ReadPath(path, Math.Max(800, timeoutMilliseconds));
+                        }
+                        catch (Exception exc)
+                        {
+                            result = Result("reader_error", exc.Message);
+                        }
+                        result.DeviceId = path;
+                        return result;
+                    }))
+                    .ToList();
+                Task.WaitAll(tasks.ToArray());
+                return tasks.Select(task => task.Result).ToList();
             }
             catch (Exception exc)
             {
-                return Result("reader_error", exc.Message);
+                return new List<ReaderResult> { Result("reader_error", exc.Message) };
             }
         }
 
@@ -152,8 +160,7 @@ namespace DjiMicBattery
 
                 while (timer.ElapsedMilliseconds < timeoutMilliseconds)
                 {
-                    int remaining = Math.Max(100, timeoutMilliseconds - (int)timer.ElapsedMilliseconds);
-                    byte[] chunk = ReadPipe(file, usb, BulkInEndpoint, Math.Min(1200, remaining));
+                    byte[] chunk = ReadPipe(usb, BulkInEndpoint);
                     if (chunk == null || chunk.Length == 0)
                     {
                         continue;
@@ -457,44 +464,21 @@ namespace DjiMicBattery
             }
         }
 
-        private static byte[] ReadPipe(IntPtr file, IntPtr usb, byte endpoint, int timeoutMilliseconds)
+        private static byte[] ReadPipe(IntPtr usb, byte endpoint)
         {
             IntPtr buffer = Marshal.AllocHGlobal(512);
-            IntPtr done = CreateEvent(IntPtr.Zero, true, false, null);
-            if (done == IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(buffer);
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "无法创建 USB 读取事件");
-            }
-
             try
             {
-                NATIVE_OVERLAPPED overlapped = new NATIVE_OVERLAPPED();
-                overlapped.EventHandle = done;
                 uint transferred;
-                bool completed = WinUsb_ReadPipe(usb, endpoint, buffer, 512, out transferred, ref overlapped);
+                bool completed = WinUsb_ReadPipe(usb, endpoint, buffer, 512, out transferred, IntPtr.Zero);
                 if (!completed)
                 {
                     int error = Marshal.GetLastWin32Error();
-                    if (error != ErrorIoPending)
+                    if (error == ErrorSemTimeout)
                     {
-                        throw new Win32Exception(error, "读取 DJI USB 数据失败");
-                    }
-                    uint wait = WaitForSingleObject(done, (uint)Math.Max(1, timeoutMilliseconds));
-                    if (wait == WaitTimeout)
-                    {
-                        CancelIoEx(file, ref overlapped);
-                        WaitForSingleObject(done, 250);
                         return null;
                     }
-                    if (wait != WaitObject0)
-                    {
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "等待 DJI USB 数据失败");
-                    }
-                    if (!WinUsb_GetOverlappedResult(usb, ref overlapped, out transferred, false))
-                    {
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "完成 DJI USB 读取失败");
-                    }
+                    throw new Win32Exception(error, "读取 DJI USB 数据失败");
                 }
 
                 if (transferred == 0)
@@ -507,7 +491,6 @@ namespace DjiMicBattery
             }
             finally
             {
-                CloseHandle(done);
                 Marshal.FreeHGlobal(buffer);
             }
         }
@@ -522,9 +505,7 @@ namespace DjiMicBattery
         private const uint DigcfDeviceInterface = 0x00000010;
         private const uint PipeTransferTimeout = 0x03;
         private const int ErrorNoMoreItems = 259;
-        private const int ErrorIoPending = 997;
-        private const uint WaitObject0 = 0;
-        private const uint WaitTimeout = 258;
+        private const int ErrorSemTimeout = 121;
         private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -545,16 +526,6 @@ namespace DjiMicBattery
             public IntPtr Reserved;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct NATIVE_OVERLAPPED
-        {
-            public IntPtr InternalLow;
-            public IntPtr InternalHigh;
-            public uint OffsetLow;
-            public uint OffsetHigh;
-            public IntPtr EventHandle;
-        }
-
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, string enumerator, IntPtr parent, uint flags);
 
@@ -573,15 +544,6 @@ namespace DjiMicBattery
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr handle);
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr CreateEvent(IntPtr attributes, bool manualReset, bool initialState, string name);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CancelIoEx(IntPtr file, ref NATIVE_OVERLAPPED overlapped);
-
         [DllImport("winusb.dll", SetLastError = true)]
         private static extern bool WinUsb_Initialize(IntPtr file, out IntPtr interfaceHandle);
 
@@ -592,9 +554,6 @@ namespace DjiMicBattery
         private static extern bool WinUsb_SetPipePolicy(IntPtr interfaceHandle, byte pipeId, uint policyType, uint valueLength, ref uint value);
 
         [DllImport("winusb.dll", SetLastError = true)]
-        private static extern bool WinUsb_ReadPipe(IntPtr interfaceHandle, byte pipeId, IntPtr buffer, uint bufferLength, out uint lengthTransferred, ref NATIVE_OVERLAPPED overlapped);
-
-        [DllImport("winusb.dll", SetLastError = true)]
-        private static extern bool WinUsb_GetOverlappedResult(IntPtr interfaceHandle, ref NATIVE_OVERLAPPED overlapped, out uint lengthTransferred, bool wait);
+        private static extern bool WinUsb_ReadPipe(IntPtr interfaceHandle, byte pipeId, IntPtr buffer, uint bufferLength, out uint lengthTransferred, IntPtr overlapped);
     }
 }

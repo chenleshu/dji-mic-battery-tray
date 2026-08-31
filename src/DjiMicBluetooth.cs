@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32;
 
 namespace DjiMicBattery
 {
@@ -24,10 +27,11 @@ namespace DjiMicBattery
         private const uint DigcfPresent = 0x00000002;
         private const uint DigcfAllClasses = 0x00000004;
         private const uint SpdrpFriendlyName = 0x0000000C;
+        private const string CaptureEndpointsPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture";
         private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
         private static readonly Guid BatteryPropertySet = new Guid("104EA319-6EE2-4701-BD47-8DDBF425BBE5");
 
-        public static BluetoothBatteryResult Read()
+        public static List<BluetoothBatteryResult> ReadAll()
         {
             IntPtr deviceInfoSet = SetupDiGetClassDevs(
                 IntPtr.Zero,
@@ -37,12 +41,13 @@ namespace DjiMicBattery
             );
             if (deviceInfoSet == InvalidHandleValue)
             {
-                return New("reader_error", "", null, "");
+                return new List<BluetoothBatteryResult> { New("reader_error", "", null, "") };
             }
 
             try
             {
-                BluetoothBatteryResult candidate = null;
+                List<string> activeCaptureNames = ReadActiveDjiCaptureNames();
+                List<BluetoothBatteryResult> results = new List<BluetoothBatteryResult>();
                 uint index = 0;
                 while (true)
                 {
@@ -64,21 +69,87 @@ namespace DjiMicBattery
                     {
                         continue;
                     }
+                    if (!IsActiveCapture(name, activeCaptureNames))
+                    {
+                        continue;
+                    }
 
                     int? battery = ReadBatteryPercent(deviceInfoSet, ref deviceInfo);
-                    candidate = New(battery.HasValue ? "ok" : "no_battery", name, battery, instanceId);
-                    if (battery.HasValue)
-                    {
-                        return candidate;
-                    }
+                    results.Add(New(battery.HasValue ? "ok" : "no_battery", name, battery, instanceId));
                 }
 
-                return candidate ?? New("no_device", "", null, "");
+                return results
+                    .GroupBy(item => item.InstanceId, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.OrderByDescending(item => item.BatteryPercent.HasValue).First())
+                    .OrderBy(item => item.DeviceName, StringComparer.CurrentCultureIgnoreCase)
+                    .ThenBy(item => item.InstanceId, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
             }
             finally
             {
                 SetupDiDestroyDeviceInfoList(deviceInfoSet);
             }
+        }
+
+        private static List<string> ReadActiveDjiCaptureNames()
+        {
+            List<string> names = new List<string>();
+            using (RegistryKey root = Registry.LocalMachine.OpenSubKey(CaptureEndpointsPath))
+            {
+                if (root == null)
+                {
+                    return names;
+                }
+                foreach (string endpointId in root.GetSubKeyNames())
+                {
+                    using (RegistryKey endpoint = root.OpenSubKey(endpointId))
+                    {
+                        object rawState = endpoint == null ? null : endpoint.GetValue("DeviceState");
+                        if (rawState == null || Convert.ToInt32(rawState) != 1)
+                        {
+                            continue;
+                        }
+                    }
+                    using (RegistryKey properties = root.OpenSubKey(endpointId + @"\Properties"))
+                    {
+                        if (properties == null)
+                        {
+                            continue;
+                        }
+                        foreach (string propertyName in properties.GetValueNames())
+                        {
+                            string value = properties.GetValue(propertyName) as string;
+                            if (!string.IsNullOrWhiteSpace(value) &&
+                                value.IndexOf("DJI Mic", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                names.Add(value);
+                            }
+                        }
+                    }
+                }
+            }
+            return names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static bool IsActiveCapture(string deviceName, List<string> activeCaptureNames)
+        {
+            string normalizedDevice = NormalizeName(deviceName);
+            return activeCaptureNames.Any(name =>
+            {
+                string normalizedActive = NormalizeName(name);
+                return normalizedActive.IndexOf(normalizedDevice, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    normalizedDevice.IndexOf(normalizedActive, StringComparison.OrdinalIgnoreCase) >= 0;
+            });
+        }
+
+        private static string NormalizeName(string value)
+        {
+            string normalized = (value ?? "").Trim();
+            if (normalized.EndsWith(" AG", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = normalized.Substring(0, normalized.Length - 3).Trim();
+            }
+            return normalized;
         }
 
         private static int? ReadBatteryPercent(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfo)

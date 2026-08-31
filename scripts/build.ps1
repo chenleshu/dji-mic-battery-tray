@@ -60,7 +60,8 @@ $arguments = @(
     '/reference:System.Windows.Forms.dll',
     (Join-Path $sourceRoot 'Program.cs'),
     (Join-Path $sourceRoot 'DjiMicBluetooth.cs'),
-    (Join-Path $sourceRoot 'DjiMicWinUsb.cs')
+    (Join-Path $sourceRoot 'DjiMicWinUsb.cs'),
+    (Join-Path $sourceRoot 'DjiMicStatus.cs')
 )
 
 & $compiler @arguments
