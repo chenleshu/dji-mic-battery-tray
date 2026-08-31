@@ -91,11 +91,39 @@ if ([Math]::Abs($dualView.Fill - 0.09) -gt 0.0001) { throw "Dual connection fill
 $passed++
 if ($dualView.Summary -notmatch '9%' -or $dualView.Summary -notmatch '3') { throw "Dual summary: $($dualView.Summary)" }
 $passed++
+if ($dualView.Summary -match '约|~') { throw "Summary must not show an approximation marker: $($dualView.Summary)" }
+$passed++
 Assert-Equal $dualView.DetailGroups.Count 2 'Bluetooth and USB detail groups'
+Assert-Equal $dualView.DetailGroups[0].Kind 'Bluetooth' 'Bluetooth detail group kind'
+Assert-Equal $dualView.DetailGroups[1].Kind 'USB' 'USB detail group kind'
 Assert-Equal $dualView.DetailGroups[0].Rows.Count 1 'One Bluetooth microphone row'
 Assert-Equal $dualView.DetailGroups[1].Rows.Count 2 'Two USB microphone rows'
 $details = (($dualView.DetailGroups | ForEach-Object { $_.Rows.Text }) -join '|')
 if ($details -notmatch 'DJI Mic Mini 2S' -or $details -notmatch 'BXTTP59013PLX1' -or $details -notmatch '62D525') { throw "Identity detail rows: $details" }
+$passed++
+if ($details -match '约值|~') { throw "Detail rows must not show an approximation marker: $details" }
+$passed++
+$tooltip = $dualView.Tooltip
+$bluetoothSymbol = [char]::ConvertFromUtf32(0x1F4F6)
+$usbSymbol = [char]::ConvertFromUtf32(0x1F50C)
+$batterySymbol = [char]::ConvertFromUtf32(0x1F50B)
+if ($tooltip -notmatch ([regex]::Escape($bluetoothSymbol + '蓝牙 Mini' + $batterySymbol + '40%')) -or
+    $tooltip -notmatch ([regex]::Escape($usbSymbol + 'USB1/T1 Mini 2' + $batterySymbol + '9%')) -or
+    $tooltip -notmatch ([regex]::Escape($usbSymbol + 'USB1/T2 Mini 2S' + $batterySymbol + '60%'))) {
+    throw "Compact tooltip rows: $tooltip"
+}
+$passed++
+if ($tooltip -match '约|~') { throw "Tooltip must not show an approximation marker: $tooltip" }
+$passed++
+if ($tooltip -match '62D525|B3MTP5P015VAZY|BXTTP59013PLX1|B3NTP5D005U1T2') {
+    throw "Tooltip must not contain serial numbers: $tooltip"
+}
+$passed++
+if ($tooltip -match '大疆麦克风电量') { throw "Tooltip should contain device rows only: $tooltip" }
+$passed++
+if ($tooltip -notmatch "`r?`n") { throw "Tooltip should use one line per microphone: $tooltip" }
+$passed++
+if ($tooltip.Length -gt 63) { throw "Tooltip exceeds the Windows NotifyIcon limit: $($tooltip.Length)" }
 $passed++
 
 $multiBluetoothView = New-View @(
@@ -123,13 +151,22 @@ if ($tieView.Summary -notmatch '5%' -or $tieView.Summary -notmatch '2') { throw 
 $passed++
 
 $badgeType = $assembly.GetType('DjiMicBattery.BatteryBadgeFactory', $true)
-$badgeArgs = New-Object object[] 2
+$badgeArgs = New-Object object[] 1
 $badgeArgs[0] = [Nullable[int]]90
-$badgeArgs[1] = [bool]$false
 $badge = $badgeType.GetMethod('Create', [Reflection.BindingFlags]'Public,Static').Invoke($null, $badgeArgs)
-Assert-Equal $badge.Width 58 'Battery badge width'
-Assert-Equal $badge.Height 22 'Battery badge height'
+Assert-Equal $badge.Width 68 'Battery badge width'
+Assert-Equal $badge.Height 26 'Battery badge height'
 $badge.Dispose()
+
+$connectionIconType = $assembly.GetType('DjiMicBattery.ConnectionIconFactory', $true)
+foreach ($kind in @('Bluetooth', 'USB')) {
+    $connectionIcon = $connectionIconType.GetMethod('Create', [Reflection.BindingFlags]'Public,Static').Invoke($null, @($kind))
+    Assert-Equal $connectionIcon.Width 22 "$kind icon width"
+    Assert-Equal $connectionIcon.Height 22 "$kind icon height"
+    if ($connectionIcon.GetPixel(11, 11).A -eq 0) { throw "$kind icon center is transparent" }
+    $passed++
+    $connectionIcon.Dispose()
+}
 
 $readerType = $assembly.GetType('DjiMicBattery.Reader', $true)
 $statusFrame = New-Object byte[] 118
