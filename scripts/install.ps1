@@ -19,11 +19,37 @@ $running = Get-CimInstance Win32_Process | Where-Object {
 }
 foreach ($process in $running) {
     Stop-Process -Id $process.ProcessId -Force
-    Wait-Process -Id $process.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
+}
+
+$stopDeadline = (Get-Date).AddSeconds(12)
+do {
+    $remaining = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ExecutablePath -and [string]::Equals($_.ExecutablePath, $installedExe, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($remaining.Count -eq 0) {
+        break
+    }
+    Start-Sleep -Milliseconds 300
+} while ((Get-Date) -lt $stopDeadline)
+
+if ($remaining.Count -gt 0) {
+    throw "旧版本未能退出，无法安全覆盖：$($remaining.ProcessId -join ', ')"
 }
 
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
+$copyDeadline = (Get-Date).AddSeconds(8)
+do {
+    try {
+        Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
+        $copied = $true
+    }
+    catch [IO.IOException] {
+        if ((Get-Date) -ge $copyDeadline) {
+            throw
+        }
+        Start-Sleep -Milliseconds 300
+    }
+} while (-not $copied)
 New-Item -Path $runKey -Force | Out-Null
 Set-ItemProperty -Path $runKey -Name $runValue -Value ('"{0}"' -f $installedExe)
 Start-Process -FilePath $installedExe

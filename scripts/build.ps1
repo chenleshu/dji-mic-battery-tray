@@ -9,6 +9,7 @@ $distRoot = Join-Path $projectRoot 'dist'
 $iconPath = Join-Path $assetsRoot 'app.ico'
 $exePath = Join-Path $distRoot '大疆麦克风电量.exe'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$wpfRoot = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\WPF'
 
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw "找不到 .NET Framework C# 编译器：$compiler"
@@ -58,7 +59,13 @@ $arguments = @(
     '/reference:System.Core.dll',
     '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
+    ('/reference:' + (Join-Path $wpfRoot 'UIAutomationClient.dll')),
+    ('/reference:' + (Join-Path $wpfRoot 'UIAutomationTypes.dll')),
+    ('/reference:' + (Join-Path $wpfRoot 'WindowsBase.dll')),
     (Join-Path $sourceRoot 'Program.cs'),
+    (Join-Path $sourceRoot 'DjiButtonRemapper.cs'),
+    (Join-Path $sourceRoot 'DjiButtonWinUsbSource.cs'),
+    (Join-Path $sourceRoot 'TypelessAutoEnter.cs'),
     (Join-Path $sourceRoot 'DjiMicBluetooth.cs'),
     (Join-Path $sourceRoot 'DjiMicWinUsb.cs'),
     (Join-Path $sourceRoot 'DjiMicStatus.cs')

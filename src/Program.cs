@@ -16,8 +16,8 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("1.4.3.0")]
-[assembly: AssemblyFileVersion("1.4.3.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace DjiMicBattery
 {
@@ -51,12 +51,20 @@ namespace DjiMicBattery
         private readonly ToolStripMenuItem statusItem;
         private readonly ToolStripMenuItem detailsItem;
         private readonly ToolStripMenuItem autostartItem;
+        private readonly ToolStripMenuItem buttonMappingItem;
+        private readonly ToolStripMenuItem buttonMappingEnabledItem;
+        private readonly ToolStripMenuItem autoEnterEnabledItem;
+        private readonly ToolStripMenuItem autoEnterSettingsItem;
+        private readonly ToolStripMenuItem[] buttonMappingPresets;
+        private readonly DjiButtonRemapper buttonRemapper;
         private readonly System.Windows.Forms.Timer timer;
+        private readonly Control dispatcher;
         private readonly string executablePath;
         private readonly string dataRoot;
         private readonly string statusPath;
         private readonly string logPath;
         private bool updating;
+        private bool shuttingDown;
 
         public TrayApplicationContext()
         {
@@ -68,6 +76,9 @@ namespace DjiMicBattery
             Directory.CreateDirectory(dataRoot);
             statusPath = Path.Combine(dataRoot, "status.txt");
             logPath = Path.Combine(dataRoot, "app.log");
+            dispatcher = new Control();
+            dispatcher.CreateControl();
+            buttonRemapper = new DjiButtonRemapper(Path.Combine(dataRoot, "button-mapping.ini"), dispatcher);
 
             statusItem = new ToolStripMenuItem("正在读取…");
             statusItem.Enabled = false;
@@ -76,6 +87,49 @@ namespace DjiMicBattery
             detailsItem.Enabled = false;
             detailsItem.DropDown.ImageScalingSize = new Size(68, 26);
             detailsItem.DropDown.MinimumSize = new Size(470, 0);
+
+            buttonMappingItem = new ToolStripMenuItem("连接键短按映射");
+            buttonMappingEnabledItem = new ToolStripMenuItem("启用映射");
+            buttonMappingEnabledItem.CheckOnClick = true;
+            buttonMappingEnabledItem.Click += delegate
+            {
+                buttonRemapper.SetEnabled(buttonMappingEnabledItem.Checked);
+                UpdateButtonMappingMenu();
+            };
+
+            buttonMappingPresets = new[] {
+                CreateMappingPreset("右 Alt", KeyGesture.RightAlt),
+                CreateMappingPreset("右 Alt + Shift", KeyGesture.RightAltShift),
+                CreateMappingPreset("右 Alt + 空格", KeyGesture.RightAltSpace)
+            };
+            ToolStripMenuItem customMappingItem = new ToolStripMenuItem("自定义按键组合…");
+            customMappingItem.Click += delegate { ShowCustomMappingDialog(); };
+            autoEnterEnabledItem = new ToolStripMenuItem("识别完成后自动回车（右 Alt）");
+            autoEnterEnabledItem.CheckOnClick = true;
+            autoEnterEnabledItem.Click += delegate
+            {
+                buttonRemapper.SetAutoEnterSettings(
+                    autoEnterEnabledItem.Checked,
+                    buttonRemapper.AutoEnterTimeoutMilliseconds,
+                    buttonRemapper.AutoEnterStableMilliseconds
+                );
+                UpdateButtonMappingMenu();
+            };
+            autoEnterSettingsItem = new ToolStripMenuItem("自动回车设置…");
+            autoEnterSettingsItem.Click += delegate { ShowAutoEnterSettingsDialog(); };
+            ToolStripMenuItem mappingNoticeItem = new ToolStripMenuItem("WinUSB 拦截大疆按键；Windows 不再收到音量键");
+            mappingNoticeItem.Enabled = false;
+            buttonMappingItem.DropDownItems.Add(buttonMappingEnabledItem);
+            buttonMappingItem.DropDownItems.Add(new ToolStripSeparator());
+            buttonMappingItem.DropDownItems.AddRange(buttonMappingPresets);
+            buttonMappingItem.DropDownItems.Add(new ToolStripSeparator());
+            buttonMappingItem.DropDownItems.Add(customMappingItem);
+            buttonMappingItem.DropDownItems.Add(new ToolStripSeparator());
+            buttonMappingItem.DropDownItems.Add(autoEnterEnabledItem);
+            buttonMappingItem.DropDownItems.Add(autoEnterSettingsItem);
+            buttonMappingItem.DropDownItems.Add(mappingNoticeItem);
+            buttonMappingItem.DropDownOpening += delegate { UpdateButtonMappingMenu(); };
+            UpdateButtonMappingMenu();
 
             ToolStripMenuItem titleItem = new ToolStripMenuItem(ProductNameZh);
             titleItem.Enabled = false;
@@ -106,6 +160,7 @@ namespace DjiMicBattery
             menu.Items.Add(titleItem);
             menu.Items.Add(statusItem);
             menu.Items.Add(detailsItem);
+            menu.Items.Add(buttonMappingItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(refreshItem);
             menu.Items.Add(autostartItem);
@@ -115,7 +170,7 @@ namespace DjiMicBattery
             notifyIcon = new NotifyIcon();
             notifyIcon.ContextMenuStrip = menu;
             notifyIcon.Text = ProductNameZh + "：正在读取";
-            notifyIcon.Icon = IconFactory.Create("offline", 0.0);
+            notifyIcon.Icon = IconFactory.Create("offline", 0.0, false);
             notifyIcon.Visible = true;
 
             timer = new System.Windows.Forms.Timer();
@@ -128,35 +183,66 @@ namespace DjiMicBattery
 
         private void UpdateStatus()
         {
-            if (updating)
+            if (updating || shuttingDown)
             {
                 return;
             }
 
             updating = true;
-            try
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                MicStatusSnapshot snapshot = MicStatusReader.Read(3500);
-                TrayView view = TrayView.FromSnapshot(snapshot);
-                ApplyView(view);
-                WriteStatus(snapshot, view);
-            }
-            catch (Exception ex)
-            {
-                notifyIcon.Text = ProductNameZh + "：电量读取失败";
-                statusItem.Text = "电量读取失败";
-                WriteLog(ex.ToString());
-            }
-            finally
-            {
-                updating = false;
-            }
+                MicStatusSnapshot snapshot = null;
+                TrayView view = null;
+                Exception failure = null;
+                try
+                {
+                    snapshot = MicStatusReader.Read(3500);
+                    view = TrayView.FromSnapshot(snapshot);
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+
+                try
+                {
+                    dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        if (shuttingDown)
+                        {
+                            return;
+                        }
+                        try
+                        {
+                            if (failure == null)
+                            {
+                                ApplyView(view);
+                                WriteStatus(snapshot, view);
+                            }
+                            else
+                            {
+                                notifyIcon.Text = ProductNameZh + "：电量读取失败";
+                                statusItem.Text = "电量读取失败";
+                                WriteLog(failure.ToString());
+                            }
+                        }
+                        finally
+                        {
+                            updating = false;
+                        }
+                    }));
+                }
+                catch (InvalidOperationException)
+                {
+                    updating = false;
+                }
+            });
         }
 
         private void ApplyView(TrayView view)
         {
             Icon oldIcon = notifyIcon.Icon;
-            notifyIcon.Icon = IconFactory.Create(view.Tone, view.Fill);
+            notifyIcon.Icon = IconFactory.Create(view.Tone, view.Fill, view.Charging);
             if (oldIcon != null)
             {
                 oldIcon.Dispose();
@@ -185,7 +271,7 @@ namespace DjiMicBattery
                 foreach (TrayDetailRow row in group.Rows)
                 {
                     ToolStripMenuItem item = new ToolStripMenuItem(row.Text);
-                    item.Image = BatteryBadgeFactory.Create(row.BatteryPercent);
+                    item.Image = BatteryBadgeFactory.Create(row.BatteryPercent, row.Charging);
                     item.ImageScaling = ToolStripItemImageScaling.None;
                     detailsItem.DropDownItems.Add(item);
                 }
@@ -208,6 +294,81 @@ namespace DjiMicBattery
             }
         }
 
+        private ToolStripMenuItem CreateMappingPreset(string text, KeyGesture gesture)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(text);
+            item.Tag = gesture;
+            item.Click += delegate
+            {
+                buttonRemapper.SetGesture(gesture);
+                buttonRemapper.SetEnabled(true);
+                UpdateButtonMappingMenu();
+            };
+            return item;
+        }
+
+        private void UpdateButtonMappingMenu()
+        {
+            buttonMappingEnabledItem.Checked = buttonRemapper.Enabled;
+            autoEnterEnabledItem.Checked = buttonRemapper.AutoEnterEnabled;
+            autoEnterSettingsItem.Text = string.Format(
+                "自动回车设置…（最长 {0}，补全后 {1}）",
+                AutoEnterTiming.FormatSeconds(buttonRemapper.AutoEnterTimeoutMilliseconds),
+                AutoEnterTiming.FormatSeconds(buttonRemapper.AutoEnterStableMilliseconds)
+            );
+            for (int i = 0; i < buttonMappingPresets.Length; i++)
+            {
+                KeyGesture preset = buttonMappingPresets[i].Tag as KeyGesture;
+                buttonMappingPresets[i].Checked = buttonRemapper.Gesture.SameAs(preset);
+            }
+            buttonMappingItem.Text = "连接键短按映射：" + buttonRemapper.Gesture.DisplayName;
+            if (!buttonRemapper.DriverReady)
+            {
+                buttonMappingItem.Text = "连接键短按映射：需要 MI_00 WinUSB";
+            }
+            else if (!buttonRemapper.Available)
+            {
+                buttonMappingItem.Text = "连接键短按映射：接口错误 " + buttonRemapper.ErrorCode;
+            }
+            else if (!buttonRemapper.HasDjiInputDevice)
+            {
+                buttonMappingItem.Text += "（等待大疆按键设备）";
+            }
+        }
+
+        private void ShowCustomMappingDialog()
+        {
+            using (KeyGestureCaptureForm form = new KeyGestureCaptureForm())
+            {
+                if (form.ShowDialog() == DialogResult.OK && form.Gesture != null)
+                {
+                    buttonRemapper.SetGesture(form.Gesture);
+                    buttonRemapper.SetEnabled(true);
+                    UpdateButtonMappingMenu();
+                }
+            }
+        }
+
+        private void ShowAutoEnterSettingsDialog()
+        {
+            using (AutoEnterSettingsForm form = new AutoEnterSettingsForm(
+                buttonRemapper.AutoEnterEnabled,
+                buttonRemapper.AutoEnterTimeoutMilliseconds,
+                buttonRemapper.AutoEnterStableMilliseconds
+            ))
+            {
+                if (form.ShowDialog() == DialogResult.OK)
+                {
+                    buttonRemapper.SetAutoEnterSettings(
+                        form.AutoEnterEnabled,
+                        form.TimeoutMilliseconds,
+                        form.StableMilliseconds
+                    );
+                    UpdateButtonMappingMenu();
+                }
+            }
+        }
+
         private static string LimitTooltip(string text)
         {
             return text.Length <= 63 ? text : text.Substring(0, 63);
@@ -221,6 +382,29 @@ namespace DjiMicBattery
             lines.Add("麦克风数=" + snapshot.Microphones.Count);
             lines.Add("摘要=" + view.Summary);
             lines.Add("提示=" + view.Tooltip.Replace(Environment.NewLine, " | "));
+            lines.Add("连接键映射=" + (buttonRemapper.Enabled ? buttonRemapper.Gesture.DisplayName : "关闭"));
+            lines.Add("连接键接口=WinUSB MI_00");
+            lines.Add("连接键驱动=" + (buttonRemapper.DriverReady ? "ok" : "missing"));
+            lines.Add("连接键监听=" + (buttonRemapper.Available ? "ok" : "error:" + buttonRemapper.ErrorCode));
+            lines.Add("连接键错误阶段=" + buttonRemapper.LastErrorStage);
+            lines.Add("大疆按键设备=" + (buttonRemapper.HasDjiInputDevice ? buttonRemapper.DjiInputDevicePath : "未检测到"));
+            lines.Add("大疆按键设备数=" + buttonRemapper.ConnectedDeviceCount);
+            lines.Add("大疆按键端点=" + buttonRemapper.EndpointSummary);
+            lines.Add("大疆按键输入=" + buttonRemapper.DjiInputCount);
+            lines.Add("大疆按键触发=" + buttonRemapper.DjiMappedCount);
+            lines.Add("大疆映射失败=" + buttonRemapper.DjiMappingFailureCount);
+            lines.Add("大疆按键释放=" + buttonRemapper.DjiReleaseCount);
+            lines.Add("系统音量拦截=" + (buttonRemapper.HasDjiInputDevice ? "source_blocked" : "inactive"));
+            lines.Add("最近注入接受=" + buttonRemapper.LastSendInputCount + "/" + buttonRemapper.LastSendInputExpectedCount);
+            lines.Add("最近注入错误=" + buttonRemapper.LastSendInputError);
+            lines.Add("最近USB报告=" + buttonRemapper.LastDjiReport);
+            lines.Add("最近映射时间=" + buttonRemapper.LastDjiTriggerAt);
+            lines.Add("自动回车=" + (buttonRemapper.AutoEnterEnabled ? "开启" : "关闭"));
+            lines.Add("自动回车状态=" + buttonRemapper.AutoEnterState);
+            lines.Add("自动回车最长等待=" + AutoEnterTiming.FormatSeconds(buttonRemapper.AutoEnterTimeoutMilliseconds));
+            lines.Add("自动回车稳定延迟=" + AutoEnterTiming.FormatSeconds(buttonRemapper.AutoEnterStableMilliseconds));
+            lines.Add("自动回车次数=" + buttonRemapper.AutoEnterSubmitCount);
+            lines.Add("最近自动回车时间=" + buttonRemapper.LastAutoEnterAt);
             for (int i = 0; i < snapshot.Microphones.Count; i++)
             {
                 MicrophoneStatus mic = snapshot.Microphones[i];
@@ -296,6 +480,7 @@ namespace DjiMicBattery
 
         private void ExitApplication()
         {
+            shuttingDown = true;
             timer.Stop();
             notifyIcon.Visible = false;
             notifyIcon.Dispose();
@@ -306,7 +491,10 @@ namespace DjiMicBattery
         {
             if (disposing)
             {
+                shuttingDown = true;
                 timer.Dispose();
+                buttonRemapper.Dispose();
+                dispatcher.Dispose();
                 if (notifyIcon != null)
                 {
                     notifyIcon.Visible = false;
@@ -321,6 +509,7 @@ namespace DjiMicBattery
     {
         public string Text { get; set; }
         public int? BatteryPercent { get; set; }
+        public bool Charging { get; set; }
     }
 
     internal sealed class TrayDetailGroup
@@ -343,6 +532,7 @@ namespace DjiMicBattery
         public double Fill { get; private set; }
         public string Tooltip { get; private set; }
         public string Summary { get; private set; }
+        public bool Charging { get; private set; }
         public List<TrayDetailGroup> DetailGroups { get; private set; }
 
         public static TrayView FromSnapshot(MicStatusSnapshot snapshot)
@@ -352,6 +542,8 @@ namespace DjiMicBattery
                 .OrderBy(mic => mic.BatteryPercent.Value)
                 .ToList();
             List<TrayDetailGroup> detailGroups = BuildDetailGroups(snapshot);
+            int chargingCount = snapshot.Microphones.Count(mic => mic.Charging);
+            bool charging = chargingCount > 0;
 
             if (known.Count == 0)
             {
@@ -363,6 +555,7 @@ namespace DjiMicBattery
                     0.0,
                     ProductNameZh + " | " + fallback,
                     fallback,
+                    charging,
                     detailGroups
                 );
             }
@@ -370,12 +563,17 @@ namespace DjiMicBattery
             int minimum = known[0].BatteryPercent.Value;
             BatteryVisual visual = BatteryVisual.FromPercent(minimum);
             string summary = "最低" + minimum + "% · " + snapshot.Microphones.Count + " 支麦克风";
+            if (charging)
+            {
+                summary += " · 充电中 " + chargingCount + " 支";
+            }
             string tooltip = BuildTooltip(snapshot.Microphones);
             return New(
                 visual.Tone,
                 visual.Fill,
                 tooltip,
                 summary,
+                charging,
                 detailGroups
             );
         }
@@ -410,6 +608,10 @@ namespace DjiMicBattery
             string battery = mic.BatteryPercent.HasValue
                 ? "\U0001F50B" + mic.BatteryPercent.Value + "%"
                 : "未知";
+            if (mic.Charging)
+            {
+                battery += "\u26A1";
+            }
             bool bluetooth = mic.Source == "Bluetooth";
             string symbol = bluetooth ? "\U0001F4F6" : "\U0001F50C";
             string interfaceName = bluetooth ? "蓝牙" : mic.Label.Replace("/TX", "/T");
@@ -473,7 +675,7 @@ namespace DjiMicBattery
                 TrayDetailGroup notices = new TrayDetailGroup { Title = "状态提示" };
                 foreach (string notice in snapshot.Notices)
                 {
-                    notices.Rows.Add(new TrayDetailRow { Text = notice, BatteryPercent = null });
+                    notices.Rows.Add(new TrayDetailRow { Text = notice, BatteryPercent = null, Charging = false });
                 }
                 groups.Add(notices);
             }
@@ -487,7 +689,8 @@ namespace DjiMicBattery
             if (mic.Charging) text += " · 充电中";
             return new TrayDetailRow {
                 Text = text,
-                BatteryPercent = mic.BatteryPercent
+                BatteryPercent = mic.BatteryPercent,
+                Charging = mic.Charging
             };
         }
 
@@ -496,13 +699,14 @@ namespace DjiMicBattery
             return string.IsNullOrWhiteSpace(value) ? "未识别" : value;
         }
 
-        private static TrayView New(string tone, double fill, string tooltip, string summary, List<TrayDetailGroup> detailGroups)
+        private static TrayView New(string tone, double fill, string tooltip, string summary, bool charging, List<TrayDetailGroup> detailGroups)
         {
             return new TrayView {
                 Tone = tone,
                 Fill = fill,
                 Tooltip = tooltip,
                 Summary = summary,
+                Charging = charging,
                 DetailGroups = detailGroups
             };
         }
@@ -556,7 +760,7 @@ namespace DjiMicBattery
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr handle);
 
-        public static Icon Create(string tone, double fill)
+        public static Icon Create(string tone, double fill, bool charging)
         {
             using (Bitmap bitmap = new Bitmap(32, 32))
             using (Graphics graphics = Graphics.FromImage(bitmap))
@@ -585,6 +789,11 @@ namespace DjiMicBattery
                     }
                 }
 
+                if (charging)
+                {
+                    ChargingGlyph.Draw(graphics, new Rectangle(8, 7, 13, 19));
+                }
+
                 IntPtr handle = bitmap.GetHicon();
                 try
                 {
@@ -608,7 +817,7 @@ namespace DjiMicBattery
 
     internal static class BatteryBadgeFactory
     {
-        public static Bitmap Create(int? percent)
+        public static Bitmap Create(int? percent, bool charging)
         {
             const int width = 68;
             const int height = 26;
@@ -660,6 +869,10 @@ namespace DjiMicBattery
                         TextFormatFlags.SingleLine |
                         TextFormatFlags.NoPadding
                     );
+                    if (charging)
+                    {
+                        ChargingGlyph.Draw(graphics, new Rectangle(5, 5, 11, 16));
+                    }
                 }
             }
             return bitmap;
@@ -675,6 +888,29 @@ namespace DjiMicBattery
             path.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             return path;
+        }
+    }
+
+    internal static class ChargingGlyph
+    {
+        public static void Draw(Graphics graphics, Rectangle bounds)
+        {
+            Point[] points = {
+                new Point(bounds.Left + bounds.Width * 6 / 10, bounds.Top),
+                new Point(bounds.Left + bounds.Width * 2 / 10, bounds.Top + bounds.Height * 6 / 10),
+                new Point(bounds.Left + bounds.Width * 5 / 10, bounds.Top + bounds.Height * 6 / 10),
+                new Point(bounds.Left + bounds.Width * 3 / 10, bounds.Bottom),
+                new Point(bounds.Right, bounds.Top + bounds.Height * 4 / 10),
+                new Point(bounds.Left + bounds.Width * 6 / 10, bounds.Top + bounds.Height * 4 / 10)
+            };
+            using (GraphicsPath path = new GraphicsPath())
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(255, 214, 10)))
+            using (Pen outline = new Pen(Color.FromArgb(210, 24, 28, 34), 1.4f))
+            {
+                path.AddPolygon(points);
+                graphics.FillPath(fill, path);
+                graphics.DrawPath(outline, path);
+            }
         }
     }
 
