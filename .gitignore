@@ -1,5 +1,12 @@
 /assets/app.ico
 /dist/
 /graphify-out/
+/drivers/
+/release/**/*.exe
+/release/**/*.zip
+/release/**/SHA256SUMS.txt
+/scripts/install-button-driver.ps1
+/scripts/restore-button-driver.ps1
+/docs/images/dji-mic-button-mapping-v2.0.0.png
 *.log
 status.txt

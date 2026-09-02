@@ -20,9 +20,7 @@
 
 ### 设备详情
 
-![大疆麦克风蓝牙与 USB 多设备详情](docs/images/dji-mic-device-details-v1.4.3.png)
-
-设备详情按蓝牙和 USB 接收器分组；每支麦克风独占一行，电池图标中央直接显示百分比，并列出设备型号和识别信息。
+设备详情按蓝牙和 USB 接收器分组；每支麦克风独占一行，电池图标中央直接显示百分比，并列出设备型号和识别信息。公开文档不展示真实设备序列号。
 
 ## 功能
 
@@ -34,7 +32,7 @@
 - 设备详情按蓝牙与各 USB 接收器分组，每支麦克风独占一行并显示百分比电池图标
 - 读取并显示麦克风产品类型与识别号，可区分 `DJI Mic Mini`、`DJI Mic Mini 2`、`DJI Mic Mini 2S`
 - 正常电量使用绿色；估算低于 10% 使用橙色；5% 使用红色
-- 右键菜单支持设备详情、立即刷新、开机自动启动和退出
+- 右键菜单支持设备详情、立即刷新、登录后自动启动和退出
 - 通过接收器 `MI_00` 的 WinUSB 中断端点直接读取大疆连接键，从源头阻止 Windows 音量命令与音量浮层，再映射为自定义按键或组合键
 - 内置 `右 Alt`、`右 Alt + Shift`、`右 Alt + 空格` 三组一键预设，也可录制最多 6 个键的自定义组合
 - 使用右 Alt 控制 Typeless 时，可在文字补全并停止变化后自动发送一次回车；最长等待时间和文字停止变化后再等待时间均可自定义
@@ -84,7 +82,9 @@ WinUSB 绑定范围是整个 `MI_00`，因此该接口下的 Consumer Control、
 
 ## 使用发行版
 
-从仓库 Releases 下载 `DJI-Mic-Battery-Tray-v2.0.0.exe` 即可运行电量托盘。新电脑若要使用连接键完全拦截，请下载完整包 `DJI-Mic-Battery-Tray-v2.0.0.zip`，按照其中的 [MI_00 WinUSB 安全配置说明](docs/MI00-WINUSB.md)，使用 Akeo Consulting 签名的 Zadig 程序只替换 Interface 0。Zadig/libwdi 会为该设备生成自签名目录证书并加入本机 Root 与 Trusted Publishers，随后销毁私钥；不接受这项系统证书变更时，请只使用电量功能。首次启动后可在托盘右键菜单中启用开机自启。
+从仓库 Releases 下载 `DJI-Mic-Battery-Tray-v2.0.1.exe` 即可直接运行电量托盘。需要自动安装、桌面快捷方式和登录后自动启动时，请下载完整包 `DJI-Mic-Battery-Tray-v2.0.1.zip` 并运行其中的安装脚本。新电脑若要使用连接键完全拦截，请按照包内的 [MI_00 WinUSB 安全配置说明](docs/MI00-WINUSB.md)，使用 Akeo Consulting 签名的 Zadig 程序只替换 Interface 0。Zadig/libwdi 会为该设备生成自签名目录证书并加入本机 Root 与 Trusted Publishers，随后销毁私钥；不接受这项系统证书变更时，请只使用电量功能。
+
+v2.0.1 将自动启动从 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 改为当前用户的 Windows 登录计划任务，托盘菜单名称为“登录后自动启动”。安装位置固定为 `%LOCALAPPDATA%\DjiMicBatteryTray\DjiMicBatteryTray.exe`；安装器同时创建桌面快捷方式，并通过受控方式启动该任务，核对实际进程路径、版本、进程 ID、启动来源和任务启用状态。该受控启动链已在当前 Windows 11 实机验证；本次没有注销或重启 Windows，因此不把真实的下一次登录触发列为已验证项目。
 
 ## 从源码构建
 
@@ -97,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\model.test.ps1
 
 输出文件位于 `dist\大疆麦克风电量.exe`。
 
-安装到当前用户并启用开机自启：
+安装到当前用户、创建桌面快捷方式并启用登录后自动启动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1

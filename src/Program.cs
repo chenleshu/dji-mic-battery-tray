@@ -9,15 +9,14 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 [assembly: AssemblyTitle("大疆麦克风电量")]
 [assembly: AssemblyDescription("在 Windows 通知区域聚合显示一个或多个 DJI 麦克风的 USB 与蓝牙电量")]
 [assembly: AssemblyCompany("chenleshu")]
 [assembly: AssemblyProduct("大疆麦克风电量")]
 [assembly: AssemblyCopyright("Released under the Unlicense")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyFileVersion("2.0.1.0")]
 
 namespace DjiMicBattery
 {
@@ -26,19 +25,86 @@ namespace DjiMicBattery
         private const string MutexName = @"Local\DjiMicBatteryTrayZhCn";
 
         [STAThread]
-        private static void Main()
+        private static int Main(string[] args)
         {
-            bool created;
-            using (Mutex mutex = new Mutex(true, MutexName, out created))
+            try
             {
-                if (!created)
+                string executablePath = Assembly.GetExecutingAssembly().Location;
+                AutostartManager autostart = new AutostartManager(executablePath);
+                if (args.Length == 1)
                 {
-                    return;
+                    if (string.Equals(args[0], "--enable-autostart", StringComparison.OrdinalIgnoreCase))
+                    {
+                        autostart.SetEnabled(true);
+                        return 0;
+                    }
+                    if (string.Equals(args[0], "--disable-autostart", StringComparison.OrdinalIgnoreCase))
+                    {
+                        autostart.SetEnabled(false);
+                        return 0;
+                    }
+                    if (string.Equals(args[0], "--check-autostart", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return autostart.IsEnabled() ? 0 : 2;
+                    }
+                    if (string.Equals(args[0], "--run-autostart", StringComparison.OrdinalIgnoreCase))
+                    {
+                        autostart.Run();
+                        return 0;
+                    }
                 }
 
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new TrayApplicationContext());
+                bool startedByAutostart = args.Any(delegate(string value)
+                {
+                    return string.Equals(value, AutostartManager.LaunchArgument, StringComparison.OrdinalIgnoreCase);
+                });
+                try
+                {
+                    autostart.RemoveLegacyRunEntry();
+                }
+                catch (Exception ex)
+                {
+                    WriteFatalLog(new InvalidOperationException("旧版自动启动项清理失败。", ex));
+                }
+
+                bool created;
+                using (Mutex mutex = new Mutex(true, MutexName, out created))
+                {
+                    if (!created)
+                    {
+                        return 0;
+                    }
+
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                    Application.Run(new TrayApplicationContext(startedByAutostart));
+                }
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                WriteFatalLog(ex);
+                return 1;
+            }
+        }
+
+        private static void WriteFatalLog(Exception failure)
+        {
+            try
+            {
+                string dataRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "大疆麦克风电量"
+                );
+                Directory.CreateDirectory(dataRoot);
+                File.AppendAllText(
+                    Path.Combine(dataRoot, "app.log"),
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " FATAL " + failure + Environment.NewLine,
+                    new UTF8Encoding(false)
+                );
+            }
+            catch
+            {
             }
         }
     }
@@ -46,7 +112,6 @@ namespace DjiMicBattery
     internal sealed class TrayApplicationContext : ApplicationContext
     {
         private const string ProductNameZh = "大疆麦克风电量";
-        private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private readonly NotifyIcon notifyIcon;
         private readonly ToolStripMenuItem statusItem;
         private readonly ToolStripMenuItem detailsItem;
@@ -63,11 +128,17 @@ namespace DjiMicBattery
         private readonly string dataRoot;
         private readonly string statusPath;
         private readonly string logPath;
+        private readonly DateTime startedAt;
+        private readonly bool startedByAutostart;
+        private readonly AutostartManager autostartManager;
+        private bool autostartEnabled;
         private bool updating;
         private bool shuttingDown;
 
-        public TrayApplicationContext()
+        public TrayApplicationContext(bool startedByAutostart)
         {
+            startedAt = DateTime.Now;
+            this.startedByAutostart = startedByAutostart;
             executablePath = Assembly.GetExecutingAssembly().Location;
             dataRoot = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -76,6 +147,14 @@ namespace DjiMicBattery
             Directory.CreateDirectory(dataRoot);
             statusPath = Path.Combine(dataRoot, "status.txt");
             logPath = Path.Combine(dataRoot, "app.log");
+            WriteLog(string.Format(
+                "START version={0} pid={1} source={2} path={3}",
+                Assembly.GetExecutingAssembly().GetName().Version,
+                System.Diagnostics.Process.GetCurrentProcess().Id,
+                startedByAutostart ? "autostart" : "manual",
+                executablePath
+            ));
+            autostartManager = new AutostartManager(executablePath);
             dispatcher = new Control();
             dispatcher.CreateControl();
             buttonRemapper = new DjiButtonRemapper(Path.Combine(dataRoot, "button-mapping.ini"), dispatcher);
@@ -137,19 +216,26 @@ namespace DjiMicBattery
             ToolStripMenuItem refreshItem = new ToolStripMenuItem("立即刷新");
             refreshItem.Click += delegate { UpdateStatus(); };
 
-            autostartItem = new ToolStripMenuItem("开机自动启动");
+            autostartItem = new ToolStripMenuItem("登录后自动启动");
             autostartItem.CheckOnClick = true;
-            autostartItem.Checked = IsAutostartEnabled();
+            RefreshAutostartState();
             autostartItem.Click += delegate
             {
                 try
                 {
-                    SetAutostart(autostartItem.Checked);
+                    autostartManager.SetEnabled(autostartItem.Checked);
+                    RefreshAutostartState();
                 }
                 catch (Exception ex)
                 {
-                    autostartItem.Checked = IsAutostartEnabled();
-                    WriteLog(ex.ToString());
+                    RefreshAutostartState();
+                    WriteLog("AUTOSTART UPDATE FAILED " + ex);
+                    MessageBox.Show(
+                        "登录后自动启动设置失败。请查看 app.log 获取详细信息。",
+                        ProductNameZh,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
                 }
             };
 
@@ -166,6 +252,7 @@ namespace DjiMicBattery
             menu.Items.Add(autostartItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
+            menu.Opening += delegate { RefreshAutostartState(); };
 
             notifyIcon = new NotifyIcon();
             notifyIcon.ContextMenuStrip = menu;
@@ -378,6 +465,12 @@ namespace DjiMicBattery
         {
             List<string> lines = new List<string>();
             lines.Add("应用=" + ProductNameZh);
+            lines.Add("版本=" + Assembly.GetExecutingAssembly().GetName().Version);
+            lines.Add("进程ID=" + System.Diagnostics.Process.GetCurrentProcess().Id);
+            lines.Add("进程路径=" + executablePath);
+            lines.Add("启动时间=" + startedAt.ToString("o"));
+            lines.Add("启动来源=" + (startedByAutostart ? "autostart" : "manual"));
+            lines.Add("自动启动=" + (autostartEnabled ? "enabled" : "disabled"));
             lines.Add("状态=" + (snapshot.Microphones.Count > 0 ? "ok" : "no_device"));
             lines.Add("麦克风数=" + snapshot.Microphones.Count);
             lines.Add("摘要=" + view.Summary);
@@ -442,40 +535,30 @@ namespace DjiMicBattery
 
         private void WriteLog(string message)
         {
-            File.AppendAllText(
-                logPath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + message + Environment.NewLine,
-                new UTF8Encoding(false)
-            );
-        }
-
-        private bool IsAutostartEnabled()
-        {
-            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath))
+            try
             {
-                string value = key == null ? null : key.GetValue(ProductNameZh) as string;
-                return string.Equals(value, Quote(executablePath), StringComparison.OrdinalIgnoreCase);
+                File.AppendAllText(
+                    logPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + message + Environment.NewLine,
+                    new UTF8Encoding(false)
+                );
+            }
+            catch
+            {
             }
         }
 
-        private void SetAutostart(bool enabled)
+        private void RefreshAutostartState()
         {
-            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath))
+            try
             {
-                if (enabled)
-                {
-                    key.SetValue(ProductNameZh, Quote(executablePath), RegistryValueKind.String);
-                }
-                else
-                {
-                    key.DeleteValue(ProductNameZh, false);
-                }
+                autostartEnabled = autostartManager.IsEnabled();
+                autostartItem.Checked = autostartEnabled;
             }
-        }
-
-        private static string Quote(string value)
-        {
-            return "\"" + value + "\"";
+            catch (Exception ex)
+            {
+                WriteLog("AUTOSTART CHECK FAILED " + ex);
+            }
         }
 
         private void ExitApplication()

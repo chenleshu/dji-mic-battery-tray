@@ -16,7 +16,83 @@ function Assert-Equal($Actual, $Expected, [string]$Message) {
     $script:passed++
 }
 
-Assert-Equal $exe.VersionInfo.FileVersion '2.0.0.0' 'Assembly file version'
+Assert-Equal $exe.VersionInfo.FileVersion '2.0.1.0' 'Assembly file version'
+
+$autostartType = $assembly.GetType('DjiMicBattery.AutostartManager', $true)
+$autostartFlags = [Reflection.BindingFlags]'NonPublic,Static'
+$definitionMatches = $autostartType.GetMethod('DefinitionMatches', $autostartFlags)
+$taskName = $autostartType.GetField('TaskName', $autostartFlags).GetRawConstantValue()
+$launchArgument = $autostartType.GetField('LaunchArgument', $autostartFlags).GetRawConstantValue()
+Assert-Equal $taskName '大疆麦克风电量' 'Autostart task name'
+Assert-Equal $launchArgument '--autostart' 'Autostart launch argument'
+$isTaskMissingException = $autostartType.GetMethod('IsTaskMissingException', $autostartFlags)
+$missingArguments = New-Object object[] 1
+$missingArguments[0] = [IO.FileNotFoundException]::new()
+Assert-Equal $isTaskMissingException.Invoke($null, $missingArguments) $true 'Task Scheduler missing-task FileNotFoundException'
+$otherArguments = New-Object object[] 1
+$otherArguments[0] = [InvalidOperationException]::new()
+Assert-Equal $isTaskMissingException.Invoke($null, $otherArguments) $false 'Autostart preserves unrelated exceptions'
+$isManagedLegacyRunCommand = $autostartType.GetMethod('IsManagedLegacyRunCommand', $autostartFlags)
+$legacyPath = Join-Path $env:LOCALAPPDATA '大疆麦克风电量\大疆麦克风电量.exe'
+$legacyRunArguments = New-Object object[] 2
+$legacyRunArguments[0] = '"' + $legacyPath + '"'
+$legacyRunArguments[1] = $exe.FullName
+Assert-Equal $isManagedLegacyRunCommand.Invoke($null, $legacyRunArguments) $true 'Autostart recognizes the legacy executable Run value'
+$unrelatedRunArguments = New-Object object[] 2
+$unrelatedRunArguments[0] = '"C:\Windows\not-this-app.exe"'
+$unrelatedRunArguments[1] = $exe.FullName
+Assert-Equal $isManagedLegacyRunCommand.Invoke($null, $unrelatedRunArguments) $false 'Autostart preserves an unrelated same-name Run value'
+
+$expectedPath = $exe.FullName
+$expectedDirectory = $exe.DirectoryName
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$expectedUser = $identity.Name
+$expectedSid = $identity.User.Value
+$identity.Dispose()
+$escapedPath = [Security.SecurityElement]::Escape($expectedPath)
+$escapedDirectory = [Security.SecurityElement]::Escape($expectedDirectory)
+$escapedUser = [Security.SecurityElement]::Escape($expectedUser)
+$escapedSid = [Security.SecurityElement]::Escape($expectedSid)
+$validTaskXml = @"
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals><Principal><UserId>$escapedSid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy></Settings>
+  <Triggers><LogonTrigger><UserId>$escapedUser</UserId></LogonTrigger></Triggers>
+  <Actions><Exec><Command>$escapedPath</Command><Arguments>--autostart</Arguments><WorkingDirectory>$escapedDirectory</WorkingDirectory></Exec></Actions>
+</Task>
+"@
+$definitionArguments = @($expectedPath, $expectedUser, $expectedSid)
+Assert-Equal $definitionMatches.Invoke($null, @($validTaskXml) + $definitionArguments) $true 'Autostart definition validation'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<Arguments>--autostart</Arguments>', '<Arguments>--wrong</Arguments>')) + $definitionArguments) $false 'Autostart rejects wrong arguments'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>', '<ExecutionTimeLimit>PT72H</ExecutionTimeLimit>')) + $definitionArguments) $false 'Autostart rejects finite execution limit'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>', '<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>')) + $definitionArguments) $false 'Autostart rejects battery restriction'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace [regex]::Escape($escapedUser), 'OTHER\user')) + $definitionArguments) $false 'Autostart rejects another user trigger'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace [regex]::Escape($escapedSid), 'S-1-5-21-999')) + $definitionArguments) $false 'Autostart rejects another principal'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '</Triggers>', '<TimeTrigger /></Triggers>')) + $definitionArguments) $false 'Autostart rejects extra triggers'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '</Actions>', '<Exec><Command>cmd.exe</Command></Exec></Actions>')) + $definitionArguments) $false 'Autostart rejects extra actions'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<LogonTrigger>', '<LogonTrigger><Enabled>false</Enabled>')) + $definitionArguments) $false 'Autostart rejects disabled trigger'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<LogonType>InteractiveToken</LogonType>', '<LogonType>Password</LogonType>')) + $definitionArguments) $false 'Autostart rejects password logon type'
+Assert-Equal $definitionMatches.Invoke($null, @(($validTaskXml -replace '<RunLevel>LeastPrivilege</RunLevel>', '<RunLevel>HighestAvailable</RunLevel>')) + $definitionArguments) $false 'Autostart rejects elevated run level'
+$wrongExecutable = Join-Path $expectedDirectory 'wrong.exe'
+$wrongDirectory = Join-Path $expectedDirectory 'wrong'
+Assert-Equal $definitionMatches.Invoke($null, @($validTaskXml.Replace($escapedPath, [Security.SecurityElement]::Escape($wrongExecutable))) + $definitionArguments) $false 'Autostart rejects wrong executable'
+Assert-Equal $definitionMatches.Invoke($null, @($validTaskXml.Replace($escapedDirectory, [Security.SecurityElement]::Escape($wrongDirectory))) + $definitionArguments) $false 'Autostart rejects wrong working directory'
+
+$programSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'src\Program.cs'))
+$installSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'scripts\install.ps1'))
+$uninstallSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'scripts\uninstall.ps1'))
+if ($programSource -match 'RunKeyPath|StartupApproved') { throw 'Program must not use the legacy Run/StartupApproved mechanism.' }
+$passed++
+if ($installSource -match 'CurrentVersion\\Run|Set-ItemProperty') { throw 'Installer must register the verified login task instead of a Run value.' }
+$passed++
+if (-not $installSource.Contains("Get-ScheduledTask -TaskPath '\'")) { throw 'Installer must query the root task folder explicitly.' }
+$passed++
+if ($installSource -match '\[string\]\$InstallRoot') { throw 'Installer must use the single supported installation directory.' }
+$passed++
+if (-not $uninstallSource.Contains("Get-ScheduledTask -TaskPath '\'")) { throw 'Uninstaller must restrict task removal to the root task folder.' }
+$passed++
+if ($uninstallSource -notmatch 'Test-ManagedRunValue') { throw 'Uninstaller must preserve an unrelated same-name Run value.' }
+$passed++
 
 $keyGestureType = $assembly.GetType('DjiMicBattery.KeyGesture', $true)
 $rightAlt = $keyGestureType.GetProperty('RightAlt', [Reflection.BindingFlags]'Public,Static').GetValue($null, $null)
